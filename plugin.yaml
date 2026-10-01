@@ -1,6 +1,6 @@
 name: hermes-council
 kind: standalone
-version: 1.0.0
+version: "1.0"
 description: >-
   LLM Council (karpathy/llm-council): 4 fixed advisor seats (First-Principles
   Analyst, Skeptic, Pragmatist, Researcher) answer in parallel, anonymously

@@ -1,0 +1,1466 @@
+From 4d03262bfe992ee7bb7c9791250446ca3cea9cc8 Mon Sep 17 00:00:00 2001
+From: girayk <girayk@gmail.com>
+Date: Thu, 1 Oct 2026 03:16:47 +0300
+Subject: [PATCH 3/4] =?UTF-8?q?feat(council):=20fixed=204-seat=20roster=20?=
+ =?UTF-8?q?=E2=80=94=20names/duties=20are=20product,=20users=20only=20pick?=
+ =?UTF-8?q?=20models?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- COUNCIL_SEATS constant: First-Principles Analyst, Skeptic, Pragmatist,
+  Researcher (names+duties from the llm-council skill protocol)
+- normalize forces every preset onto the 4 seats positionally; unassigned
+  seats are legal and skipped by the engine; extra/renamed seats rejected
+  at the write boundary (422)
+- role now steers stage-1 via a per-seat system message; stage-2 stays
+  anonymous (sentinel tests prove no name/role/model-id leaks to reviewers)
+- panel: seat name + duty shown as static text, provider/model dropdowns
+  only — no add/remove member, no name/role inputs, no preset create/
+  delete/set-default controls
+- model menu: 'Council: <preset>' rows now show the seat names underneath
+  (preset_members on the virtual picker row)
+- CLI: 'hermes council list' prints seats with duties; configure walks the
+  4 fixed seats (keep/pick/unassign) + judge + chairman
+- defaults: council preset ships unassigned (strictly opt-in, no silent billing)
+- tests: 70 passed (35 council python + moa regression + inventory); desktop
+  tsc 0 errors, vitest 36+44 passed
+---
+ .../src/app/settings/model-settings.test.tsx  | 105 +++++----
+ .../src/app/settings/model-settings.tsx       | 194 ++--------------
+ .../src/app/shell/model-catalog-menu.tsx      |  34 ++-
+ apps/desktop/src/i18n/en.ts                   |  10 +-
+ apps/desktop/src/i18n/types.ts                |  10 +-
+ hermes_cli/config_defaults.py                 |  10 +-
+ hermes_cli/council_cmd.py                     |  74 +++---
+ hermes_cli/council_config.py                  | 125 ++++++++--
+ hermes_cli/inventory.py                       |  18 ++
+ tests/agent/test_council_loop.py              | 141 ++++++-----
+ tests/hermes_cli/test_council_config.py       | 219 +++++++++++-------
+ 11 files changed, 482 insertions(+), 458 deletions(-)
+
+diff --git a/apps/desktop/src/app/settings/model-settings.test.tsx b/apps/desktop/src/app/settings/model-settings.test.tsx
+index 8cc20c81d..5aec464dd 100644
+--- a/apps/desktop/src/app/settings/model-settings.test.tsx
++++ b/apps/desktop/src/app/settings/model-settings.test.tsx
+@@ -793,11 +793,25 @@ describe('ModelSettings Council preset editor', () => {
+     presets: {
+       default: {
+         members: [
+-          { provider: 'nous', model: 'hermes-4', name: 'Skeptic', role: 'Challenge assumptions and find flaws' },
+-          { provider: 'openrouter', model: 'deepseek/deepseek-v4-pro' }
++          {
++            provider: 'nous',
++            model: 'hermes-4',
++            name: 'First-Principles Analyst',
++            role: 'Reason from fundamentals',
++            enabled: true
++          },
++          {
++            provider: 'openrouter',
++            model: 'deepseek/deepseek-v4-pro',
++            name: 'Skeptic',
++            role: 'Hunt for failure modes',
++            enabled: true
++          },
++          { provider: '', model: '', name: 'Pragmatist', role: 'What actually works in practice', enabled: false },
++          { provider: '', model: '', name: 'Researcher', role: 'Ground claims in verifiable evidence', enabled: false }
+         ],
+         judge: { provider: '', model: '', name: '' },
+-        chairman: { provider: 'openrouter', model: 'anthropic/claude-opus-4.8', name: 'Foreman' },
++        chairman: { provider: 'openrouter', model: 'anthropic/claude-opus-4.8', name: '' },
+         lite: false,
+         enabled: true,
+         member_temperature: null,
+@@ -805,11 +819,25 @@ describe('ModelSettings Council preset editor', () => {
+       }
+     },
+     members: [
+-      { provider: 'nous', model: 'hermes-4', name: 'Skeptic', role: 'Challenge assumptions and find flaws' },
+-      { provider: 'openrouter', model: 'deepseek/deepseek-v4-pro' }
++      {
++        provider: 'nous',
++        model: 'hermes-4',
++        name: 'First-Principles Analyst',
++        role: 'Reason from fundamentals',
++        enabled: true
++      },
++      {
++        provider: 'openrouter',
++        model: 'deepseek/deepseek-v4-pro',
++        name: 'Skeptic',
++        role: 'Hunt for failure modes',
++        enabled: true
++      },
++      { provider: '', model: '', name: 'Pragmatist', role: 'What actually works in practice', enabled: false },
++      { provider: '', model: '', name: 'Researcher', role: 'Ground claims in verifiable evidence', enabled: false }
+     ],
+     judge: { provider: '', model: '', name: '' },
+-    chairman: { provider: 'openrouter', model: 'anthropic/claude-opus-4.8', name: 'Foreman' },
++    chairman: { provider: 'openrouter', model: 'anthropic/claude-opus-4.8', name: '' },
+     lite: false,
+     enabled: true
+   })
+@@ -838,58 +866,51 @@ describe('ModelSettings Council preset editor', () => {
+ 
+   async function openCouncilEditor() {
+     renderModelSettings()
+-    // The named member's header proves name round-trips into the row title.
+-    expect(await screen.findByText('Member 1 — Skeptic')).toBeTruthy()
+-    expect(screen.getByText('Member 2')).toBeTruthy()
++    // The fixed seat names render as row titles.
++    expect(await screen.findByText('First-Principles Analyst')).toBeTruthy()
++    expect(screen.getByText('Skeptic')).toBeTruthy()
++    expect(screen.getByText('Pragmatist')).toBeTruthy()
++    expect(screen.getByText('Researcher')).toBeTruthy()
+   }
+ 
+-  it('renders member name/role inputs pre-filled from the loaded config', async () => {
++  it('renders the 4 fixed seats with names + roles and no add/remove/name controls', async () => {
+     await openCouncilEditor()
+ 
+-    const names = screen.getAllByPlaceholderText('Name (e.g. Skeptic)')
+-    const roles = screen.getAllByPlaceholderText('Duty on the council (steers its answer)')
+-
+-    expect(names).toHaveLength(2)
+-    expect(roles).toHaveLength(2)
+-    expect((names[0] as HTMLInputElement).value).toBe('Skeptic')
+-    expect((roles[0] as HTMLInputElement).value).toBe('Challenge assumptions and find flaws')
+-    expect((names[1] as HTMLInputElement).value).toBe('')
++    // Seat duties are shown as static text, not editable inputs.
++    expect(screen.getByText('Reason from fundamentals')).toBeTruthy()
++    expect(screen.getByText('Hunt for failure modes')).toBeTruthy()
+ 
+-    // Judge + Chairman carry their own optional name inputs.
+-    expect(screen.getAllByPlaceholderText('Name (optional)')).toHaveLength(2)
+-    expect((screen.getAllByPlaceholderText('Name (optional)')[1] as HTMLInputElement).value).toBe('Foreman')
++    // No member add/remove, no preset create/delete, no name/role inputs.
++    expect(screen.queryByPlaceholderText('Name (e.g. Skeptic)')).toBeNull()
++    expect(screen.queryByPlaceholderText('Duty on the council (steers its answer)')).toBeNull()
++    expect(screen.queryByRole('button', { name: 'Add member' })).toBeNull()
++    expect(screen.queryByRole('button', { name: 'Add preset' })).toBeNull()
++    expect(screen.queryByRole('button', { name: 'Remove' })).toBeNull()
++    expect(screen.queryByRole('button', { name: 'Delete' })).toBeNull()
++    expect(screen.queryByRole('button', { name: 'Set default' })).toBeNull()
++    expect(screen.queryByPlaceholderText('new preset')).toBeNull()
+   })
+ 
+-  it('autosaves a typed member name/role in the debounced council payload', async () => {
++  it('autosaves a seat toggle and keeps the 4 fixed seats with their names', async () => {
+     vi.useFakeTimers({ shouldAdvanceTime: true })
+ 
+     try {
+       await openCouncilEditor()
+ 
+-      const names = screen.getAllByPlaceholderText('Name (e.g. Skeptic)')
+-      const roles = screen.getAllByPlaceholderText('Duty on the council (steers its answer)')
+-
+-      fireEvent.change(names[1], { target: { value: 'Historian' } })
+-      fireEvent.change(roles[1], { target: { value: 'Provide prior context' } })
++      // Toggle the Pragmatist seat's switch (aria-label from councilMemberToggle).
++      fireEvent.click(screen.getByRole('switch', { name: 'Enable member 3' }))
+       await vi.advanceTimersByTimeAsync(700)
+ 
+       expect(saveCouncilModels).toHaveBeenCalled()
+       const sent = saveCouncilModels.mock.calls.at(-1)![0] as ReturnType<typeof councilConfig>
+-      expect(sent.presets.default.members[1]).toEqual({
+-        provider: 'openrouter',
+-        model: 'deepseek/deepseek-v4-pro',
+-        name: 'Historian',
+-        role: 'Provide prior context'
+-      })
+-      // The untouched named member rides along unchanged.
+-      expect(sent.presets.default.members[0]).toEqual({
+-        provider: 'nous',
+-        model: 'hermes-4',
+-        name: 'Skeptic',
+-        role: 'Challenge assumptions and find flaws'
+-      })
+-      // The row header follows the typed name live.
+-      expect(screen.getByText('Member 2 — Historian')).toBeTruthy()
++      expect(sent.presets.default.members).toHaveLength(4)
++      expect(sent.presets.default.members.map(mm => mm.name)).toEqual([
++        'First-Principles Analyst',
++        'Skeptic',
++        'Pragmatist',
++        'Researcher'
++      ])
++      expect(sent.presets.default.members[2].enabled).toBe(true)
+     } finally {
+       vi.useRealTimers()
+     }
+diff --git a/apps/desktop/src/app/settings/model-settings.tsx b/apps/desktop/src/app/settings/model-settings.tsx
+index f595aa278..bf653c64c 100644
+--- a/apps/desktop/src/app/settings/model-settings.tsx
++++ b/apps/desktop/src/app/settings/model-settings.tsx
+@@ -153,22 +153,22 @@ export const moaConfigComplete = (config: MoaConfigResponse): boolean =>
+ export const councilSlotComplete = (slot: CouncilMemberSlot): boolean => !!(slot.provider.trim() && slot.model.trim())
+ 
+ // A council preset is persistable when its chairman slot is complete and at
+-// least one enabled member is complete. The judge may stay empty (peer-review
+-// mode), so it is never part of the completeness check — but a half-filled
+-// judge (provider picked, model pending) still holds the save, mirroring the
++// least one seat has a model assigned. Seats are FIXED (4 named seats); an
++// unassigned seat is legal and must never hold the autosave, and a half-filled
++// seat/judge (provider picked, model pending) still holds it, mirroring the
+ // MoA hold-on-incomplete behavior.
+ export const councilConfigComplete = (config: CouncilConfigResponse): boolean =>
+   Object.values(config.presets).every(preset => {
+-    const enabledMembers = preset.members.filter(member => member.enabled !== false)
++    const assignedMembers = preset.members.filter(member => councilSlotComplete(member))
++
++    const halfFilledMember = preset.members.some(
++      member => !councilSlotComplete(member) && (member.provider.trim() || member.model.trim())
++    )
++
+     const judgeEmpty = !preset.judge.provider.trim() && !preset.judge.model.trim()
+     const judgeOk = judgeEmpty || councilSlotComplete(preset.judge)
+ 
+-    return (
+-      councilSlotComplete(preset.chairman) &&
+-      enabledMembers.length > 0 &&
+-      enabledMembers.every(councilSlotComplete) &&
+-      judgeOk
+-    )
++    return councilSlotComplete(preset.chairman) && assignedMembers.length > 0 && !halfFilledMember && judgeOk
+   })
+ 
+ // Persistent mismatch: any aux slot pinned to a provider different from the
+@@ -287,7 +287,6 @@ export function ModelSettings({ onMainModelChanged, scopeProfile, subpage }: Mod
+   const [newMoaPresetName, setNewMoaPresetName] = useState('')
+   const [council, setCouncil] = useState<CouncilConfigResponse | null>(null)
+   const [selectedCouncilPreset, setSelectedCouncilPreset] = useState('')
+-  const [newCouncilPresetName, setNewCouncilPresetName] = useState('')
+   // agent.* defaults round-trip through the shared config cache (read → write
+   // back the whole record), so a save here shows in the MCP/model surfaces.
+   const { data: config, writeScope } = useHermesConfigRecord(scopeProfile)
+@@ -1712,77 +1711,6 @@ export function ModelSettings({ onMainModelChanged, scopeProfile, subpage }: Mod
+                 size="xs"
+               />
+             </label>
+-            <Button
+-              disabled={applying}
+-              onClick={() => {
+-                const next: CouncilConfigResponse = {
+-                  ...council,
+-                  default_preset: selectedCouncilPreset || council.default_preset
+-                }
+-
+-                void saveCouncil(next)
+-              }}
+-              size="sm"
+-              variant="text"
+-            >
+-              {m.councilSetDefault}
+-            </Button>
+-            <Button
+-              disabled={Object.keys(council.presets).length <= 1 || applying}
+-              onClick={() => {
+-                if (Object.keys(council.presets).length <= 1) {
+-                  return
+-                }
+-
+-                const presets = { ...council.presets }
+-                delete presets[selectedCouncilPreset]
+-                const fallback = Object.keys(presets)[0]
+-
+-                const next: CouncilConfigResponse = {
+-                  ...council,
+-                  presets,
+-                  default_preset: council.default_preset === selectedCouncilPreset ? fallback : council.default_preset,
+-                  active_preset: council.active_preset === selectedCouncilPreset ? '' : council.active_preset
+-                }
+-
+-                setSelectedCouncilPreset(
+-                  Object.keys(council.presets).find(name => name !== selectedCouncilPreset) || ''
+-                )
+-                void saveCouncil(next)
+-              }}
+-              size="sm"
+-              variant="ghost"
+-            >
+-              {t.common.delete}
+-            </Button>
+-            <Input
+-              className={cn('w-40', CONTROL_TEXT)}
+-              onChange={event => setNewCouncilPresetName(event.target.value)}
+-              placeholder={m.councilNewPresetPlaceholder}
+-              value={newCouncilPresetName}
+-            />
+-            <Button
+-              disabled={!newCouncilPresetName.trim() || !!council.presets[newCouncilPresetName.trim()] || applying}
+-              onClick={() => {
+-                const name = newCouncilPresetName.trim()
+-
+-                const next: CouncilConfigResponse = {
+-                  ...council,
+-                  presets: {
+-                    ...council.presets,
+-                    [name]: { ...currentCouncilPreset, members: [...currentCouncilPreset.members] }
+-                  }
+-                }
+-
+-                setSelectedCouncilPreset(name)
+-                setNewCouncilPresetName('')
+-                void saveCouncil(next)
+-              }}
+-              size="sm"
+-              variant="textStrong"
+-            >
+-              {m.councilAddPreset}
+-            </Button>
+           </div>
+           <div className="mb-2 text-xs text-muted-foreground">
+             {m.councilDefault} <span className="font-mono">{council.default_preset}</span>
+@@ -1805,38 +1733,9 @@ export function ModelSettings({ onMainModelChanged, scopeProfile, subpage }: Mod
+                 }
+                 below={
+                   <div className="mt-2 grid gap-2 pt-1">
+-                    <div className="flex flex-wrap items-center gap-2">
+-                      <Input
+-                        aria-label={m.councilMemberName}
+-                        className={cn('w-40', CONTROL_TEXT)}
+-                        disabled={applying}
+-                        onChange={event =>
+-                          updateCouncilPreset(prev => ({
+-                            ...prev,
+-                            members: prev.members.map((s, i) =>
+-                              i === index ? updateCouncilSlot(s, { name: event.target.value }) : s
+-                            )
+-                          }))
+-                        }
+-                        placeholder={m.councilMemberName}
+-                        value={slot.name ?? ''}
+-                      />
+-                      <Input
+-                        aria-label={m.councilMemberRole}
+-                        className={cn('w-72 max-w-full', CONTROL_TEXT)}
+-                        disabled={applying}
+-                        onChange={event =>
+-                          updateCouncilPreset(prev => ({
+-                            ...prev,
+-                            members: prev.members.map((s, i) =>
+-                              i === index ? updateCouncilSlot(s, { role: event.target.value }) : s
+-                            )
+-                          }))
+-                        }
+-                        placeholder={m.councilMemberRole}
+-                        value={slot.role ?? ''}
+-                      />
+-                    </div>
++                    {slot.role ? (
++                      <p className="text-[0.68rem] leading-snug text-muted-foreground">{slot.role}</p>
++                    ) : null}
+                     <div className="flex flex-wrap items-center gap-2">
+                       <Select
+                         onValueChange={value =>
+@@ -1882,57 +1781,24 @@ export function ModelSettings({ onMainModelChanged, scopeProfile, subpage }: Mod
+                         providerSlug={slot.provider}
+                         value={slot.model}
+                       />
+-                      <Button
+-                        disabled={currentCouncilPreset.members.length <= 1 || applying}
+-                        onClick={() =>
+-                          updateCouncilPreset(prev => ({
+-                            ...prev,
+-                            members: prev.members.filter((_, i) => i !== index)
+-                          }))
+-                        }
+-                        size="sm"
+-                        variant="ghost"
+-                      >
+-                        {t.common.remove}
+-                      </Button>
+                     </div>
+                   </div>
+                 }
+                 className={cn(slot.enabled === false && 'opacity-60')}
+                 description={
+                   <span className="font-mono text-[0.68rem]">
+-                    {slot.provider} · {slot.model || m.model}
++                    {slot.provider || slot.model ? `${slot.provider} · ${slot.model}` : m.councilSeatUnassigned}
+                   </span>
+                 }
+                 key={`${selectedCouncilPreset}-${index}`}
+                 title={
+                   <span className="flex items-baseline gap-2">
+-                    {slot.name?.trim()
+-                      ? m.councilMemberNamedTitle(index + 1, slot.name.trim())
+-                      : m.councilMemberTitle(index + 1)}
++                    {slot.name?.trim() || m.councilMemberTitle(index + 1)}
+                     <Pill>{m.councilMemberHint}</Pill>
+                   </span>
+                 }
+               />
+             ))}
+-            <Button
+-              disabled={applying}
+-              onClick={() =>
+-                updateCouncilPreset(prev => ({
+-                  ...prev,
+-                  // Seed the new slot from the chairman's provider/model but
+-                  // never inherit its display name — members are named per-slot.
+-                  members: [
+-                    ...prev.members,
+-                    { provider: prev.chairman.provider, model: prev.chairman.model, enabled: true }
+-                  ]
+-                }))
+-              }
+-              size="sm"
+-              variant="textStrong"
+-            >
+-              {m.councilAddMember}
+-            </Button>
+             <ListRow
+               action={
+                 <Switch
+@@ -1946,21 +1812,6 @@ export function ModelSettings({ onMainModelChanged, scopeProfile, subpage }: Mod
+               }
+               below={
+                 <div className="mt-2 grid gap-2 pt-1">
+-                  <div className="flex flex-wrap items-center gap-2">
+-                    <Input
+-                      aria-label={m.councilJudgeName}
+-                      className={cn('w-40', CONTROL_TEXT)}
+-                      disabled={applying}
+-                      onChange={event =>
+-                        updateCouncilPreset(prev => ({
+-                          ...prev,
+-                          judge: updateCouncilSlot(prev.judge, { name: event.target.value })
+-                        }))
+-                      }
+-                      placeholder={m.councilJudgeName}
+-                      value={currentCouncilPreset.judge.name ?? ''}
+-                    />
+-                  </div>
+                   <div className="flex flex-wrap items-center gap-2">
+                     <Select
+                       onValueChange={value =>
+@@ -2022,21 +1873,6 @@ export function ModelSettings({ onMainModelChanged, scopeProfile, subpage }: Mod
+             <ListRow
+               below={
+                 <div className="mt-2 grid gap-2 pt-1">
+-                  <div className="flex flex-wrap items-center gap-2">
+-                    <Input
+-                      aria-label={m.councilChairmanName}
+-                      className={cn('w-40', CONTROL_TEXT)}
+-                      disabled={applying}
+-                      onChange={event =>
+-                        updateCouncilPreset(prev => ({
+-                          ...prev,
+-                          chairman: updateCouncilSlot(prev.chairman, { name: event.target.value })
+-                        }))
+-                      }
+-                      placeholder={m.councilChairmanName}
+-                      value={currentCouncilPreset.chairman.name ?? ''}
+-                    />
+-                  </div>
+                   <div className="flex flex-wrap items-center gap-2">
+                     <Select
+                       onValueChange={value =>
+diff --git a/apps/desktop/src/app/shell/model-catalog-menu.tsx b/apps/desktop/src/app/shell/model-catalog-menu.tsx
+index d21db3551..47a933274 100644
+--- a/apps/desktop/src/app/shell/model-catalog-menu.tsx
++++ b/apps/desktop/src/app/shell/model-catalog-menu.tsx
+@@ -294,12 +294,22 @@ export function ModelCatalogMenu({
+   )
+ 
+   // Same for Council presets: a virtual `council` provider row whose models
+-  // are the enabled preset names.
+-  const councilPresets = useMemo(
+-    () => (includeCouncil ? (providers?.find(p => p.slug.toLowerCase() === 'council')?.models ?? []) : []),
++  // are the enabled preset names. The row also carries `preset_members`
++  // (preset name -> fixed seat names) so the menu can show WHO is on the
++  // council under each preset.
++  const councilRow = useMemo(
++    () => (includeCouncil ? providers?.find(p => p.slug.toLowerCase() === 'council') : undefined),
+     [providers, includeCouncil]
+   )
+ 
++  const councilPresets = useMemo(() => councilRow?.models ?? [], [councilRow])
++
++  const councilPresetMembers = useMemo(() => {
++    const raw = (councilRow as { preset_members?: Record<string, string[]> } | undefined)?.preset_members
++
++    return raw && typeof raw === 'object' ? raw : {}
++  }, [councilRow])
++
+   const pickerProviders = useMemo(
+     () =>
+       withCustomModels(
+@@ -678,7 +688,11 @@ export function ModelCatalogMenu({
+         <DropdownMenuItem className={dropdownMenuRow} disabled>
+           {error}
+         </DropdownMenuItem>
+-      ) : groups.length === 0 && moaPresets.length === 0 && councilPresets.length === 0 && shownDownloads.length === 0 && !customSlug ? (
++      ) : groups.length === 0 &&
++        moaPresets.length === 0 &&
++        councilPresets.length === 0 &&
++        shownDownloads.length === 0 &&
++        !customSlug ? (
+         <DropdownMenuItem className={dropdownMenuRow} disabled>
+           {copy.noModels}
+         </DropdownMenuItem>
+@@ -902,6 +916,7 @@ export function ModelCatalogMenu({
+           <DropdownMenuLabel className={dropdownMenuSectionLabel}>{copy.councilPresetsHeading}</DropdownMenuLabel>
+           {shownCouncilPresets.map(preset => {
+             const isCurrentCouncil = current.provider === 'council' && current.model === preset
++            const seatNames = councilPresetMembers[preset] ?? []
+ 
+             return (
+               <DropdownMenuItem
+@@ -912,8 +927,15 @@ export function ModelCatalogMenu({
+                 }}
+                 {...kbRowProps(`council:${preset}`)}
+               >
+-                <span className="min-w-0 flex-1 truncate">
+-                  {copy.councilPresetPrefix} <HighlightMatches foldSeparators query={search} text={preset} />
++                <span className="flex min-w-0 flex-1 flex-col">
++                  <span className="truncate">
++                    {copy.councilPresetPrefix} <HighlightMatches foldSeparators query={search} text={preset} />
++                  </span>
++                  {seatNames.length > 0 ? (
++                    <span className="truncate text-[0.625rem] text-(--ui-text-quaternary)">
++                      {seatNames.join(' · ')}
++                    </span>
++                  ) : null}
+                 </span>
+                 {isCurrentCouncil ? <Codicon className="ml-auto text-foreground" name="check" size="0.75rem" /> : null}
+               </DropdownMenuItem>
+diff --git a/apps/desktop/src/i18n/en.ts b/apps/desktop/src/i18n/en.ts
+index e52bda4ed..80aa8017b 100644
+--- a/apps/desktop/src/i18n/en.ts
++++ b/apps/desktop/src/i18n/en.ts
+@@ -1862,24 +1862,16 @@ export const en: Translations = {
+       councilDescription:
+         'Configure named presets that appear as models under the Council provider. Members answer in parallel, then review each other (or the judge ranks). The chairman is the acting model — it runs every step of the tool loop, and almost all of the run’s cost is billed to its provider.',
+       councilEnabled: 'Enabled',
+-      councilSetDefault: 'Set default',
+-      councilNewPresetPlaceholder: 'new preset',
+-      councilAddPreset: 'Add preset',
+       councilDefault: 'Default:',
+       councilMemberToggle: (enabled, index) => `${enabled ? 'Disable' : 'Enable'} member ${index}`,
+       councilMemberTitle: index => `Member ${index}`,
+-      councilMemberNamedTitle: (index, name) => `Member ${index} — ${name}`,
+-      councilMemberName: 'Name (e.g. Skeptic)',
+-      councilMemberRole: 'Duty on the council (steers its answer)',
++      councilSeatUnassigned: 'no model selected',
+       councilMemberHint: 'answers + reviews once per turn',
+-      councilAddMember: 'Add member',
+       councilJudge: 'Judge',
+       councilJudgeToggle: 'Enable judge',
+-      councilJudgeName: 'Name (optional)',
+       councilJudgeHint: 'ranks the member answers',
+       councilJudgeEmpty: 'Empty: members review each other anonymously',
+       councilChairman: 'Chairman',
+-      councilChairmanName: 'Name (optional)',
+       councilChairmanBilled: 'acting model · billed for the run',
+       tasks: {
+         vision: { label: 'Vision', hint: 'Image analysis' },
+diff --git a/apps/desktop/src/i18n/types.ts b/apps/desktop/src/i18n/types.ts
+index a0332e047..4b3458c32 100644
+--- a/apps/desktop/src/i18n/types.ts
++++ b/apps/desktop/src/i18n/types.ts
+@@ -1586,24 +1586,16 @@ export interface Translations {
+       councilPreset: string
+       councilDescription: string
+       councilEnabled: string
+-      councilSetDefault: string
+-      councilNewPresetPlaceholder: string
+-      councilAddPreset: string
+       councilDefault: string
+       councilMemberToggle: (enabled: boolean, index: number) => string
+       councilMemberTitle: (index: number) => string
+-      councilMemberNamedTitle: (index: number, name: string) => string
+-      councilMemberName: string
+-      councilMemberRole: string
++      councilSeatUnassigned: string
+       councilMemberHint: string
+-      councilAddMember: string
+       councilJudge: string
+       councilJudgeToggle: string
+-      councilJudgeName: string
+       councilJudgeHint: string
+       councilJudgeEmpty: string
+       councilChairman: string
+-      councilChairmanName: string
+       councilChairmanBilled: string
+       tasks: Record<string, AuxTaskCopy>
+     }
+diff --git a/hermes_cli/config_defaults.py b/hermes_cli/config_defaults.py
+index a8c24f5d2..d371f9301 100644
+--- a/hermes_cli/config_defaults.py
++++ b/hermes_cli/config_defaults.py
+@@ -1460,13 +1460,17 @@ DEFAULT_CONFIG = {
+         "active_preset": "",
+         "presets": {
+             "default": {
++                # The four fixed seats (names/roles forced by normalize); all
++                # unassigned until the user picks models, so nothing bills silently.
+                 "members": [
+-                    {"provider": "openai-codex", "model": "gpt-5.5"},
+-                    {"provider": "openrouter", "model": "deepseek/deepseek-v4-pro"},
++                    {"provider": "", "model": "", "enabled": False},
++                    {"provider": "", "model": "", "enabled": False},
++                    {"provider": "", "model": "", "enabled": False},
++                    {"provider": "", "model": "", "enabled": False},
+                 ],
+                 # Empty judge => peer-review mode: every member reviews the others.
+                 "judge": {"provider": "", "model": "", "enabled": True},
+-                "chairman": {"provider": "openrouter", "model": "anthropic/claude-opus-4.8"},
++                "chairman": {"provider": "", "model": ""},
+                 "lite": False,
+                 "enabled": True,
+             }
+diff --git a/hermes_cli/council_cmd.py b/hermes_cli/council_cmd.py
+index 81cc2472f..5861115b5 100644
+--- a/hermes_cli/council_cmd.py
++++ b/hermes_cli/council_cmd.py
+@@ -6,7 +6,7 @@ from typing import Any
+ 
+ from hermes_cli.config import load_config, save_config
+ from hermes_cli.council_config import (
+-    DEFAULT_COUNCIL_PRESET_NAME, _NAME_MAX_CHARS, _ROLE_MAX_CHARS,
++    COUNCIL_SEATS, DEFAULT_COUNCIL_PRESET_NAME,
+     council_config_complete, normalize_council_config)
+ 
+ 
+@@ -107,20 +107,20 @@ def _print_config(config: dict[str, Any]) -> None:
+     print(f"Active in config: {cfg.get('active_preset') or '(off)'}")
+     for name, preset in cfg["presets"].items():
+         print(f"\n{'*' if name == cfg['default_preset'] else ' '} {name}")
+-        print("  Members (answer in parallel, then review once per user turn):")
++        print("  Seats (fixed council — pick a model for each):")
+         for idx, slot in enumerate(preset["members"], start=1):
+-            flag = "" if slot.get("enabled", True) else " (disabled)"
+-            print(f"    {idx}. {_format_slot(slot)}{flag}")
+-            if str(slot.get("name") or "").strip():
+-                print(f"       Name: {slot['name']}")
+-            if str(slot.get("role") or "").strip():
+-                print(f"       Role: {slot['role']}")
++            seat = str(slot.get("name") or f"Seat {idx}")
++            state = _format_slot(slot)
++            if not slot.get("enabled", True) and slot.get("provider"):
++                state += " (disabled)"
++            print(f"    {idx}. {seat}  ->  {state}")
++            role = str(slot.get("role") or "").strip()
++            if role:
++                print(f"       {role}")
+         judge = preset.get("judge") or {}
+         if judge.get("provider"):
+             judge_state = "" if judge.get("enabled", True) else " (disabled)"
+             print(f"  Judge: {_format_slot(judge)}{judge_state} (ranks the anonymized member answers)")
+-            if str(judge.get("name") or "").strip():
+-                print(f"    Name: {judge['name']}")
+         else:
+             print("  Judge: (unset — members review each other anonymously)")
+         chair_slot = preset.get("chairman") or {}
+@@ -128,8 +128,6 @@ def _print_config(config: dict[str, Any]) -> None:
+             f"  Chairman: {_format_slot(chair_slot)} "
+             "(acting model — runs every step and carries almost all of the cost)"
+         )
+-        if str(chair_slot.get("name") or "").strip():
+-            print(f"    Name: {chair_slot['name']}")
+         if preset.get("lite"):
+             print("  Lite: on (stage-2 review skipped)")
+         if not preset.get("enabled", True):
+@@ -157,27 +155,25 @@ def _cmd_configure(cfg: dict, args) -> None:
+     preset_name = (getattr(args, "name", None) or council.get("default_preset") or DEFAULT_COUNCIL_PRESET_NAME).strip()
+     current: dict[str, Any] = council["presets"].get(preset_name, council["presets"][council["default_preset"]])
+     print(f"Configure Council preset: {preset_name}")
+-    print("Pick at least one member model; choose Done when finished.")
+-    members: list[dict[str, str]] = []
++    print("The council has 4 fixed seats. Pick a model for each (Enter keeps the current one).")
+     existing = list(current.get("members") or [])
+-    while True:
+-        base = existing[len(members)] if len(members) < len(existing) else None
+-        picked = _pick_slot(base)
+-        picked["enabled"] = bool((base or {}).get("enabled", True))
+-        # Optional display name + duty/role (empty line = unset). Prefill from the slot
+-        # being edited so re-running configure doesn't wipe them on Enter-through.
+-        print(f"Give this member an optional display name (shown in progress + the chairman's guidance).")
+-        picked["name"] = _prompt_optional(f"Name [{(base or {}).get('name', '') or 'none'}]", _NAME_MAX_CHARS) \
+-            or str((base or {}).get("name") or "")
+-        print("Give this member an optional ROLE (duty). It is injected into that member's "
+-              "stage-1 prompt only — reviewers never see it (anonymized peer review).")
+-        picked["role"] = _prompt_optional(f"Role [{(base or {}).get('role', '') or 'none'}]", _ROLE_MAX_CHARS) \
+-            or str((base or {}).get("role") or "")
+-        members.append(picked)
+-        if _prompt_choice("Add another member model?", ["Add another", "Done"], 1) == 1:
+-            break
++    members: list[dict[str, Any]] = []
++    for idx, seat in enumerate(COUNCIL_SEATS):
++        base = existing[idx] if idx < len(existing) else {}
++        current_model = _format_slot(base)
++        print(f"\n[{idx + 1}/4] {seat['name']} — {seat['role']}")
++        print(f"      current: {current_model}")
++        if _prompt_choice(f"Seat: {seat['name']}", ["Keep current", "Pick a model", "Leave unassigned"],
++                          0 if base.get("provider") else 1) == 1:
++            picked = _pick_slot({k: base.get(k, "") for k in ("provider", "model")})
++            members.append({"provider": picked["provider"], "model": picked["model"], "enabled": True})
++        elif base.get("provider"):
++            members.append({"provider": base["provider"], "model": base["model"],
++                            "enabled": bool(base.get("enabled", True))})
++        else:
++            members.append({"provider": "", "model": "", "enabled": False})
+     # Judge slot is optional: empty means peer-review mode (every member reviews the others).
+-    print("Configure the judge model (optional).")
++    print("\nConfigure the judge model (optional).")
+     print(
+         "The judge ranks the anonymized member answers in one call. Leave it unset to have the "
+         "members review each other instead (peer review)."
+@@ -188,29 +184,21 @@ def _cmd_configure(cfg: dict, args) -> None:
+     judge_default = 1 if current_judge.get("provider") else 0
+     if _prompt_choice("Judge slot", judge_rows, judge_default) == 1:
+         picked = _pick_slot({k: current_judge.get(k, "") for k in ("provider", "model")})
+-        print("Give the judge an optional display name.")
+-        name = _prompt_optional(f"Name [{current_judge.get('name', '') or 'none'}]", _NAME_MAX_CHARS) \
+-            or str(current_judge.get("name") or "")
+-        current["judge"] = {**picked, "name": name, "enabled": bool(current_judge.get("enabled", True))}
++        current["judge"] = {**picked, "enabled": bool(current_judge.get("enabled", True))}
+     else:
+         current["judge"] = {"provider": "", "model": "", "enabled": bool(current_judge.get("enabled", True))}
+-    print("Configure the chairman model.")
++    print("\nConfigure the chairman model.")
+     print(
+         "The chairman is the acting model: it runs every tool-loop step, and almost all of the "
+         "run's cost lands on its provider. Members answer once per user turn and review each "
+         "other (or the judge ranks), so a council run bills N+1 (lite) up to 2N+1 model calls "
+         "per turn on top of the chairman."
+     )
+-    chairman = _pick_slot(current.get("chairman"))
+-    print("Give the chairman an optional display name.")
+-    chairman["name"] = _prompt_optional(
+-        f"Name [{(current.get('chairman') or {}).get('name', '') or 'none'}]", _NAME_MAX_CHARS) \
+-        or str((current.get("chairman") or {}).get("name") or "")
+-    current["chairman"] = chairman
++    current["chairman"] = _pick_slot(current.get("chairman"))
+     if not council_config_complete(current):
+         raise SystemExit(
+             "Refusing to save an incomplete Council preset: the chairman slot and at least one "
+-            "enabled member are required.")
++            "assigned member seat are required.")
+     council["presets"][preset_name] = current
+     council.setdefault("default_preset", preset_name)
+     notice = _provider_mismatch_notice(cfg, current["chairman"])
+diff --git a/hermes_cli/council_config.py b/hermes_cli/council_config.py
+index 4a765ba7b..36d336ff9 100644
+--- a/hermes_cli/council_config.py
++++ b/hermes_cli/council_config.py
+@@ -23,23 +23,56 @@ from hermes_cli.moa_config import (  # shared coercion helpers (same package, Mo
+ 
+ DEFAULT_COUNCIL_PRESET_NAME = "default"
+ 
+-DEFAULT_COUNCIL_MEMBERS: list[dict[str, str]] = [
+-    {"provider": "openai-codex", "model": "gpt-5.5"},
+-    {"provider": "openrouter", "model": "deepseek/deepseek-v4-pro"}]
++# The FIXED council roster. Seat names and duties are product, not user config:
++# the panel renders exactly these four seats and the user only picks the model
++# for each. normalize forces every preset onto this roster positionally, so an
++# older/hand-edited config can never rename, reorder, add or drop a seat.
++COUNCIL_SEATS: tuple[dict[str, str], ...] = (
++    {
++        "name": "First-Principles Analyst",
++        "role": "Reason from fundamentals; ignore convention and popularity.",
++    },
++    {
++        "name": "Skeptic",
++        "role": ("Assume the obvious answer is wrong; hunt for failure modes, "
++                 "hidden costs and base rates."),
++    },
++    {
++        "name": "Pragmatist",
++        "role": ("What actually works in practice - constraints, effort, "
++                 "reversibility, second-order effects."),
++    },
++    {
++        "name": "Researcher",
++        "role": ("Ground claims in verifiable evidence; use web search and code "
++                 "inspection where available."),
++    },
++)
++
++COUNCIL_SEAT_COUNT = len(COUNCIL_SEATS)
++_SEAT_NAMES = tuple(seat["name"] for seat in COUNCIL_SEATS)
++_SEAT_ROLES = tuple(seat["role"] for seat in COUNCIL_SEATS)
++
++DEFAULT_COUNCIL_MEMBERS: list[dict[str, str]] = []
+ 
+ # An unset judge (empty provider+model) means peer-review mode: every member reviews the
+ # anonymized answers of the others.
+ DEFAULT_COUNCIL_JUDGE: dict[str, Any] = {"provider": "", "model": "", "enabled": True}
+ 
+-DEFAULT_COUNCIL_CHAIRMAN: dict[str, str] = {
+-    "provider": "openrouter", "model": "anthropic/claude-opus-4.8"}
++DEFAULT_COUNCIL_CHAIRMAN: dict[str, str] = {"provider": "", "model": ""}
+ 
+ # Virtual-provider slugs that must never appear inside a preset slot (recursive fan-out).
+ _FORBIDDEN_SLOT_PROVIDERS = {"council", "moa"}
+ 
+ 
+ def _default_members() -> list[dict[str, Any]]:
+-    return [{**slot, "enabled": True} for slot in deepcopy(DEFAULT_COUNCIL_MEMBERS)]
++    """The four fixed seats, all unassigned (empty provider/model, disabled).
++
++    Unassigned seats are skipped by the engine, so a fresh preset never silently
++    bills a model the user did not pick."""
++    return [{"provider": "", "model": "", "enabled": False,
++             "name": name, "role": role}
++            for name, role in zip(_SEAT_NAMES, _SEAT_ROLES)]
+ 
+ 
+ def slot_problem(slot: Any) -> str | None:
+@@ -128,14 +161,44 @@ def _clean_judge(raw: Any) -> dict[str, Any]:
+     return {**clean, "enabled": enabled}
+ 
+ 
++def _clean_member_slot(raw: Any, seat: dict[str, str]) -> dict[str, Any]:
++    """One fixed seat, cleaned. Name/role come from COUNCIL_SEATS and are never
++    taken from the config. An incomplete or invalid model assignment degrades to
++    an unassigned seat (skipped by the engine) instead of being dropped."""
++    slot = raw if isinstance(raw, dict) else {}
++    provider = str(slot.get("provider") or "").strip()
++    model = str(slot.get("model") or "").strip()
++    assigned = (
++        bool(provider) and bool(model)
++        and provider.lower() not in _FORBIDDEN_SLOT_PROVIDERS
++    )
++    clean: dict[str, Any] = {
++        "provider": provider if assigned else "",
++        "model": model if assigned else "",
++        "enabled": _coerce_bool(slot.get("enabled"), True) if assigned else False,
++        "name": seat["name"],
++        "role": seat["role"],
++    }
++    effort = _clean_reasoning_effort(slot.get("reasoning_effort"))
++    if effort and assigned:
++        clean["reasoning_effort"] = effort
++    return clean
++
++
+ def _normalize_preset(raw: Any) -> dict[str, Any]:
+     if not isinstance(raw, dict):
+         raw = {}
+-    cleaned = (_clean_slot(item, include_enabled=True, include_role=True) for item in _member_slots(raw.get("members")))
+-    members = [item for item in cleaned if item is not None]
++    raw_members = _member_slots(raw.get("members"))
++    # Force the fixed roster positionally: seat i always takes COUNCIL_SEATS[i]'s
++    # name/role, and the i-th configured member's provider/model/enabled. A config
++    # with fewer members pads with unassigned seats; extra members are dropped.
++    members = [
++        _clean_member_slot(raw_members[i] if i < len(raw_members) else None, seat)
++        for i, seat in enumerate(COUNCIL_SEATS)
++    ]
+     return {
+         "enabled": _coerce_bool(raw.get("enabled"), True),
+-        "members": members or _default_members(),
++        "members": members,
+         "judge": _clean_judge(raw.get("judge")),
+         "chairman": _clean_slot(raw.get("chairman")) or deepcopy(DEFAULT_COUNCIL_CHAIRMAN),
+         "lite": _coerce_bool(raw.get("lite"), False),
+@@ -231,15 +294,45 @@ def validate_council_payload(raw: Any) -> list[str]:
+         members = preset.get("members")
+         if not isinstance(members, list):
+             members = [members] if isinstance(members, dict) else []
+-        issues = [(index, slot_problem(slot)) for index, slot in enumerate(members)]
+-        problems.extend(f"preset '{label}' member {index + 1}: {issue}" for index, issue in issues if issue)
++        if len(members) > COUNCIL_SEAT_COUNT:
++            problems.append(
++                f"preset '{label}': the council has {COUNCIL_SEAT_COUNT} fixed seats "
++                f"({', '.join(_SEAT_NAMES)}); got {len(members)} members — seats cannot be added")
++        issues = []
+         for index, slot in enumerate(members):
++            # An unassigned seat (no provider AND no model) is legal — the engine
++            # skips it. Only a half-filled or invalid assignment is a problem.
+             if isinstance(slot, dict):
+-                problems.extend(
+-                    f"preset '{label}' member {index + 1}: {issue}"
+-                    for issue in _optional_text_problems(slot, allow_role=True))
+-        if not members or all(issue for _, issue in issues):
+-            problems.append(f"preset '{label}': needs at least one complete member model")
++                provider = str(slot.get("provider") or "").strip()
++                model = str(slot.get("model") or "").strip()
++                if not provider and not model:
++                    issues.append((index, None))
++                    continue
++            issues.append((index, slot_problem(slot)))
++        problems.extend(f"preset '{label}' member {index + 1}: {issue}" for index, issue in issues if issue)
++        for index, slot in enumerate(members):
++            if not isinstance(slot, dict):
++                continue
++            problems.extend(
++                f"preset '{label}' member {index + 1}: {issue}"
++                for issue in _optional_text_problems(slot, allow_role=True))
++            # Seat names/roles are fixed product copy, not user-editable config.
++            seat = COUNCIL_SEATS[index] if index < COUNCIL_SEAT_COUNT else None
++            if seat is not None:
++                for key, fixed in (("name", seat["name"]), ("role", seat["role"])):
++                    given = slot.get(key)
++                    if isinstance(given, str) and given.strip() and given.strip() != fixed:
++                        problems.append(
++                            f"preset '{label}' member {index + 1}: {key} is fixed to "
++                            f"'{fixed}' and cannot be changed")
++        assigned = [
++            slot for slot in members
++            if isinstance(slot, dict)
++            and str(slot.get("provider") or "").strip()
++            and str(slot.get("model") or "").strip()
++        ]
++        if not assigned:
++            problems.append(f"preset '{label}': needs at least one member with a model selected")
+ 
+         chairman_raw = preset.get("chairman")
+         chairman_issue = slot_problem(chairman_raw)
+diff --git a/hermes_cli/inventory.py b/hermes_cli/inventory.py
+index bf3489e11..a63baba2b 100644
+--- a/hermes_cli/inventory.py
++++ b/hermes_cli/inventory.py
+@@ -848,9 +848,27 @@ def _council_provider_row(current_provider: str = "") -> dict | None:
+         models = [name for name, preset in cfg.get("presets", {}).items() if preset.get("enabled", True)]
+         if not models:
+             return None
++        # Per-preset member display names so pickers/menus can show WHO is on the
++        # council next to the preset name. Falls back to provider:model when a
++        # member has no explicit name.
++        preset_members: dict[str, list[str]] = {}
++        for name in models:
++            preset = cfg["presets"].get(name) or {}
++            labels = []
++            for slot in preset.get("members") or []:
++                if not isinstance(slot, dict) or not slot.get("enabled", True):
++                    continue
++                nm = str(slot.get("name") or "").strip()
++                if not nm:
++                    prov, mod = str(slot.get("provider") or ""), str(slot.get("model") or "")
++                    nm = f"{prov}:{mod}" if prov and mod else (mod or prov)
++                if nm:
++                    labels.append(nm)
++            preset_members[name] = labels
+         return _row(
+             "council", "Council", (current_provider or "").lower() == "council", models=models,
+             total_models=len(models), source="virtual", authenticated=True, auth_type="virtual",
++            preset_members=preset_members,
+             warning=("Chairman is the acting model billed for the run; members answer once per user "
+                      "turn and review each other (or the judge ranks)."))
+     except Exception:
+diff --git a/tests/agent/test_council_loop.py b/tests/agent/test_council_loop.py
+index 10c05bcbd..a9997e542 100644
+--- a/tests/agent/test_council_loop.py
++++ b/tests/agent/test_council_loop.py
+@@ -110,11 +110,11 @@ def test_peer_review_three_members_ranks_and_guidance(council_home, monkeypatch)
+     assert "FINAL RANKING digest" in guidance
+     # Digest carries avg rank + votes for every member answer.
+     assert "avg 1.00 (3 votes)" in guidance
+-    # De-anonymized member answers with model ids.
+-    assert "Response A (openrouter:member-1)" in guidance
+-    assert "Response C (openrouter:member-3)" in guidance
++    # De-anonymized member answers carry the FIXED seat names.
++    assert "Response A (First-Principles Analyst (openrouter:member-1))" in guidance
++    assert "Response C (Pragmatist (openrouter:member-3))" in guidance
++    assert "Reviewer First-Principles Analyst (openrouter:member-1)" in guidance
+     # Reviewer excerpts with their ranking.
+-    assert "Reviewer openrouter:member-1" in guidance
+     assert "1. Response A" in guidance
+     assert "chairman of an LLM council" in guidance
+ 
+@@ -217,10 +217,11 @@ def test_failed_member_dropped_with_note(council_home, monkeypatch):
+     guidance = prepared["guidance"]
+     assert guidance
+     assert "[LLM Council" in guidance
+-    assert "openrouter:member-2 [failed:" in guidance
++    # Failure notes carry the fixed seat name + model id.
++    assert "Skeptic (openrouter:member-2) [failed:" in guidance
+     # Surviving members still answered (labels A and B, re-lettered past the drop).
+-    assert "Response A (openrouter:member-1)" in guidance
+-    assert "Response B (openrouter:member-3)" in guidance
++    assert "Response A (First-Principles Analyst (openrouter:member-1))" in guidance
++    assert "Response B (Pragmatist (openrouter:member-3))" in guidance
+     tasks = [c["task"] for c in calls]
+     assert tasks.count("council_review") == 2  # only the two survivors review
+ 
+@@ -353,22 +354,23 @@ def test_consume_member_usage_shape(council_home, monkeypatch):
+ 
+ 
+ # ---------------------------------------------------------------------------
+-# (f) member NAME + ROLE: stage-1 system message, display labels, anonymity
++# (f) FIXED SEATS: stage-1 role system message, seat-name labels, stage-2 anonymity
+ # ---------------------------------------------------------------------------
+ 
+-NAME_SENTINEL = "SkepticSentinel"
+-ROLE_SENTINEL = "ROLESENTINEL: doubt every claim"
+-ROLE_ONLY_SENTINEL = "ROLEONLYSENTINEL"
++from hermes_cli.council_config import COUNCIL_SEATS  # noqa: E402
+ 
++_SEAT1_NAME, _SEAT1_ROLE = COUNCIL_SEATS[0]["name"], COUNCIL_SEATS[0]["role"]
++_SEAT2_NAME, _SEAT2_ROLE = COUNCIL_SEATS[1]["name"], COUNCIL_SEATS[1]["role"]
+ 
+-def _write_named_config(home, *, chairman_name="", judge=None, members=None):
+-    """Config with named/roled members: member-1 has name+role, member-2 has neither,
+-    member-3 has a role but no name (label fallback path)."""
++
++def _write_seat_config(home, *, chairman_name="", judge=None, members=None):
++    """Config with 3 assigned seats. Any name/role the raw config carries must be
++    IGNORED by normalize (seats are fixed); we include bogus ones to prove it."""
+     judge = judge or {"provider": "", "model": ""}
+     members = members if members is not None else [
+-        {"model": "member-1", "name": NAME_SENTINEL, "role": ROLE_SENTINEL},
++        {"model": "member-1", "name": "BogusName", "role": "Bogus duty"},
+         {"model": "member-2"},
+-        {"model": "member-3", "role": ROLE_ONLY_SENTINEL},
++        {"model": "member-3"},
+     ]
+     member_lines = []
+     for member in members:
+@@ -411,38 +413,35 @@ def _all_message_text(call):
+     return "\n".join(str(m.get("content")) for m in call.get("messages") or [])
+ 
+ 
+-def test_member_with_role_gets_role_system_message(council_home, monkeypatch):
+-    _write_named_config(council_home)
++def test_assigned_seat_gets_fixed_role_system_message(council_home, monkeypatch):
++    _write_seat_config(council_home)
+     calls = _install_fake(monkeypatch)
+     _facade().prepare(messages=[{"role": "user", "content": "plan the migration"}])
+ 
+     by_model = _member_calls_by_model(calls)
+-    # Named + roled member: one extra system message carrying name and role.
++    # Seat 1 (First-Principles Analyst): exactly one extra system message carrying
++    # the FIXED seat name and role — not the bogus config values.
+     msgs = by_model["member-1"]["messages"]
+-    role_msgs = [m for m in msgs if m["role"] == "system" and NAME_SENTINEL in str(m["content"])]
++    role_msgs = [m for m in msgs if m["role"] == "system" and _SEAT1_NAME in str(m["content"])]
+     assert len(role_msgs) == 1
+     text = str(role_msgs[0]["content"])
+-    assert text.startswith(f"You are {NAME_SENTINEL}, a member of an LLM council.")
+-    assert f"Your duty on this council: {ROLE_SENTINEL}." in text
+-    assert "Answer the user's question from that perspective, as rigorously as you can." in text
++    assert text.startswith(f"You are {_SEAT1_NAME}, a member of an LLM council.")
++    assert f"Your duty on this council: {_SEAT1_ROLE}." in text
++    assert "BogusName" not in text and "Bogus duty" not in text
+ 
+-    # Unroled member: messages exactly as before — a single system prompt, no sentinels.
++    # Seat 2 (Skeptic) gets its own fixed duty.
+     msgs2 = by_model["member-2"]["messages"]
+-    assert sum(1 for m in msgs2 if m["role"] == "system") == 1
+-    joined = _all_message_text(by_model["member-2"])
+-    assert NAME_SENTINEL not in joined
+-    assert ROLE_SENTINEL not in joined
+-    assert ROLE_ONLY_SENTINEL not in joined
++    role2 = [m for m in msgs2 if m["role"] == "system" and _SEAT2_NAME in str(m["content"])]
++    assert len(role2) == 1
++    assert f"Your duty on this council: {_SEAT2_ROLE}." in str(role2[0]["content"])
+ 
+-    # Roled but UNNAMED member: the name falls back to the provider:model id.
+-    msgs3 = by_model["member-3"]["messages"]
+-    role3 = [m for m in msgs3 if m["role"] == "system" and ROLE_ONLY_SENTINEL in str(m["content"])]
+-    assert len(role3) == 1
+-    assert "You are openrouter:member-3, a member of an LLM council." in str(role3[0]["content"])
++    # Each member sees ONLY its own duty, never another seat's role text.
++    assert _SEAT2_ROLE not in _all_message_text(by_model["member-1"])
++    assert _SEAT1_ROLE not in _all_message_text(by_model["member-2"])
+ 
+ 
+-def test_guidance_and_events_use_name_labels(council_home, monkeypatch):
+-    _write_named_config(council_home, chairman_name="ChairName")
++def test_guidance_and_events_use_seat_names(council_home, monkeypatch):
++    _write_seat_config(council_home, chairman_name="ChairName")
+     _install_fake(monkeypatch)
+     events: list[tuple] = []
+     from agent.council_loop import CouncilChatCompletions
+@@ -451,31 +450,30 @@ def test_guidance_and_events_use_name_labels(council_home, monkeypatch):
+     prepared = facade.prepare(messages=[{"role": "user", "content": "plan the migration"}])
+ 
+     guidance = prepared["guidance"]
+-    # De-anonymized member answers: 'NAME (provider:model)' labels.
+-    assert f"Response A ({NAME_SENTINEL} (openrouter:member-1))" in guidance
+-    assert "Response B (openrouter:member-2)" in guidance  # unnamed stays plain
+-    # Reviewer excerpt headers and chairman lines carry names too.
+-    assert f"Reviewer {NAME_SENTINEL} (openrouter:member-1)" in guidance
++    # De-anonymized member answers carry the fixed seat names; bogus config names never appear.
++    assert f"Response A ({_SEAT1_NAME} (openrouter:member-1))" in guidance
++    assert f"Response B ({_SEAT2_NAME} (openrouter:member-2))" in guidance
++    assert "BogusName" not in guidance
++    assert f"Reviewer {_SEAT1_NAME} (openrouter:member-1)" in guidance
+     assert "Chairman/acting model: ChairName (openrouter:chairman-model)" in guidance
+ 
+     by_event: dict[str, list] = {}
+     for event, kw in events:
+         by_event.setdefault(event, []).append(kw)
+-    # council.member payload carries the name (empty string when unset).
++    # council.member payload carries the seat name.
+     member_by_label = {kw["label"]: kw for kw in by_event.get("council.member", [])}
+-    assert member_by_label[f"{NAME_SENTINEL} (openrouter:member-1)"]["name"] == NAME_SENTINEL
+-    assert member_by_label["openrouter:member-2"]["name"] == ""
++    assert member_by_label[f"{_SEAT1_NAME} (openrouter:member-1)"]["name"] == _SEAT1_NAME
+     # council.review reviewer label + phase chairman label carry names.
+     reviewers = {kw["reviewer"] for kw in by_event.get("council.review", [])}
+-    assert f"{NAME_SENTINEL} (openrouter:member-1)" in reviewers
++    assert f"{_SEAT1_NAME} (openrouter:member-1)" in reviewers
+     chairmen = {kw["chairman"] for kw in by_event.get("council.phase", [])}
+     assert "ChairName (openrouter:chairman-model)" in chairmen
+ 
+ 
+ def test_stage2_anonymity_peer_review_hides_names_and_roles(council_home, monkeypatch):
+     """karpathy anti-favoritism rule: reviewers see ONLY 'Response A/B/C' labels —
+-    never a member name or role string."""
+-    _write_named_config(council_home)
++    never a seat name, role string, or model id."""
++    _write_seat_config(council_home)
+     calls = _install_fake(monkeypatch)
+     _facade().prepare(messages=[{"role": "user", "content": "plan the migration"}])
+ 
+@@ -483,16 +481,16 @@ def test_stage2_anonymity_peer_review_hides_names_and_roles(council_home, monkey
+     assert len(reviews) == 3
+     for call in reviews:
+         blob = _all_message_text(call)
+-        assert NAME_SENTINEL not in blob
+-        assert ROLE_SENTINEL not in blob
+-        assert ROLE_ONLY_SENTINEL not in blob
+-        assert "ChairName" not in blob
++        for seat in COUNCIL_SEATS:
++            assert seat["name"] not in blob
++            assert seat["role"] not in blob
++        assert "BogusName" not in blob
++        assert "openrouter:member-1" not in blob
+         assert "Response A" in blob
+-        assert "openrouter:member-1" not in blob  # pre-existing model-id anonymity holds
+ 
+ 
+ def test_stage2_anonymity_judge_hides_names_and_roles(council_home, monkeypatch):
+-    _write_named_config(
++    _write_seat_config(
+         council_home, chairman_name="ChairName",
+         judge={"provider": "openrouter", "model": "judge-model"})
+     calls = _install_fake(monkeypatch)
+@@ -501,20 +499,37 @@ def test_stage2_anonymity_judge_hides_names_and_roles(council_home, monkeypatch)
+     judge_calls = [c for c in calls if c["task"] == "council_judge"]
+     assert len(judge_calls) == 1
+     blob = _all_message_text(judge_calls[0])
+-    assert NAME_SENTINEL not in blob
+-    assert ROLE_SENTINEL not in blob
+-    assert ROLE_ONLY_SENTINEL not in blob
++    for seat in COUNCIL_SEATS:
++        assert seat["name"] not in blob
++        assert seat["role"] not in blob
++    assert "ChairName" not in blob
+     assert "Response A" in blob
+ 
+ 
+-def test_failed_named_member_uses_name_label(council_home, monkeypatch):
+-    _write_named_config(council_home, members=[
+-        {"model": "member-1", "name": NAME_SENTINEL, "role": ROLE_SENTINEL},
++def test_failed_seat_uses_seat_name_label(council_home, monkeypatch):
++    _write_seat_config(council_home, members=[
++        {"model": "member-1"},
+         {"model": "member-2"},
+     ])
+-    calls = _install_fake(monkeypatch, fail_models=("member-1",),
+-                          ranking="FINAL RANKING:\n1. Response A")
++    _install_fake(monkeypatch, fail_models=("member-1",),
++                  ranking="FINAL RANKING:\n1. Response A")
+     prepared = _facade().prepare(messages=[{"role": "user", "content": "plan the migration"}])
+     guidance = prepared["guidance"]
+-    assert f"{NAME_SENTINEL} (openrouter:member-1) [failed:" in guidance
+-    assert "Response A (openrouter:member-2)" in guidance
++    assert f"{_SEAT1_NAME} (openrouter:member-1) [failed:" in guidance
++    assert f"Response A ({_SEAT2_NAME} (openrouter:member-2))" in guidance
++
++
++def test_unassigned_seats_are_skipped(council_home, monkeypatch):
++    """Seats without a model are never called (only assigned ones fan out)."""
++    _write_seat_config(council_home, members=[{"model": "member-1"}])  # 1 assigned, 3 unassigned
++    calls = _install_fake(monkeypatch, ranking="FINAL RANKING:\n1. Response A")
++    from agent.council_loop import CouncilChatCompletions
++    facade = CouncilChatCompletions("default")
++    resp = facade.create(model="default",
++                         messages=[{"role": "user", "content": "plan the migration"}])
++    assert resp is not None
++    tasks = [c["task"] for c in calls]
++    assert tasks.count("council_member") == 1
++    # Single answer => stage 2 skipped (peer review needs >=2 answers).
++    assert tasks.count("council_review") == 0
++    assert tasks.count("council_chairman") == 1
+diff --git a/tests/hermes_cli/test_council_config.py b/tests/hermes_cli/test_council_config.py
+index 70d5c63cc..bfc281772 100644
+--- a/tests/hermes_cli/test_council_config.py
++++ b/tests/hermes_cli/test_council_config.py
+@@ -1,13 +1,13 @@
+-"""Tests for hermes_cli/council_config.py — name/role support on council slots.
++"""Tests for hermes_cli/council_config.py — the FIXED 4-seat roster.
+ 
+-Follows tests/hermes_cli/test_moa_config.py patterns: read-time tolerance
+-(normalize) vs write-time strictness (validate), plus a save/load round-trip
+-under an isolated HERMES_HOME.
++Seat names/roles are product constants (COUNCIL_SEATS): normalize forces every
++preset onto exactly 4 positionally-aligned seats, unassigned seats stay legal,
++and validate rejects extra seats or renamed/re-roled seats.
+ """
+ 
+-import pytest
+-
+ from hermes_cli.council_config import (
++    COUNCIL_SEAT_COUNT,
++    COUNCIL_SEATS,
+     council_config_complete,
+     normalize_council_config,
+     resolve_council_preset,
+@@ -15,131 +15,174 @@ from hermes_cli.council_config import (
+     validate_council_payload,
+ )
+ 
++_SEAT_NAMES = [seat["name"] for seat in COUNCIL_SEATS]
++
+ 
+-def _payload(**member_extra):
+-    member = {"provider": "openrouter", "model": "m1", **member_extra}
++def _payload(members=None):
+     return {
+         "presets": {
+             "p": {
+-                "members": [member],
++                "members": members if members is not None else [
++                    {"provider": "openrouter", "model": "m1"},
++                    {"provider": "openrouter", "model": "m2"},
++                ],
+                 "judge": {"provider": "", "model": ""},
+-                "chairman": {"provider": "openrouter", "model": "chair", "name": "The Chair"},
++                "chairman": {"provider": "openrouter", "model": "chair"},
+             }
+         }
+     }
+ 
+ 
+-# ── normalize: round-trip name/role ─────────────────────────────────────────
++# ── normalize forces the fixed roster ────────────────────────────────────────
+ 
+ 
+-def test_normalize_roundtrips_member_name_and_role():
+-    cfg = normalize_council_config(_payload(name="Skeptic", role="Challenge every assumption."))
+-    member = cfg["presets"]["p"]["members"][0]
+-    assert member["name"] == "Skeptic"
+-    assert member["role"] == "Challenge every assumption."
+-    assert member["provider"] == "openrouter" and member["model"] == "m1"
+-    assert member["enabled"] is True
++def test_normalize_forces_four_seats_with_fixed_names_and_roles():
++    cfg = normalize_council_config(_payload())
++    members = cfg["presets"]["p"]["members"]
++    assert len(members) == COUNCIL_SEAT_COUNT == 4
++    assert [m["name"] for m in members] == _SEAT_NAMES
++    for member, seat in zip(members, COUNCIL_SEATS):
++        assert member["role"] == seat["role"]
+ 
+ 
+-def test_normalize_strips_whitespace_and_drops_empty_name_role():
+-    cfg = normalize_council_config(_payload(name="  Padded  ", role="   "))
+-    member = cfg["presets"]["p"]["members"][0]
+-    assert member["name"] == "Padded"
+-    # Empty string means unset: the key is dropped (minimal slot convention).
+-    assert "role" not in member
++def test_normalize_overrides_user_supplied_names_and_roles():
++    payload = _payload(members=[
++        {"provider": "qwen", "model": "a", "name": "My Custom Name", "role": "My custom duty"},
++        {"provider": "qwen", "model": "b"},
++    ])
++    members = normalize_council_config(payload)["presets"]["p"]["members"]
++    assert members[0]["name"] == _SEAT_NAMES[0]
++    assert members[0]["role"] == COUNCIL_SEATS[0]["role"]
+ 
+ 
+-def test_normalize_drops_unset_name_role_keys():
+-    cfg = normalize_council_config(_payload())
+-    member = cfg["presets"]["p"]["members"][0]
+-    assert "name" not in member
+-    assert "role" not in member
++def test_normalize_pads_missing_seats_as_unassigned():
++    members = normalize_council_config(_payload())["presets"]["p"]["members"]
++    assert members[0]["provider"] == "openrouter" and members[0]["enabled"] is True
++    for unassigned in members[2:]:
++        assert unassigned["provider"] == "" and unassigned["model"] == ""
++        assert unassigned["enabled"] is False
+ 
+ 
+-def test_normalize_truncates_overlong_name_and_role():
+-    cfg = normalize_council_config(_payload(name="x" * 200, role="y" * 2000))
+-    member = cfg["presets"]["p"]["members"][0]
+-    assert len(member["name"]) <= 60
+-    assert len(member["role"]) <= 500
++def test_normalize_drops_extra_members_beyond_seats():
++    payload = _payload(members=[
++        {"provider": "qwen", "model": f"m{i}"} for i in range(6)
++    ])
++    members = normalize_council_config(payload)["presets"]["p"]["members"]
++    assert len(members) == COUNCIL_SEAT_COUNT
++    assert [m["model"] for m in members[:4]] == ["m0", "m1", "m2", "m3"]
+ 
+ 
+-def test_normalize_non_string_name_role_degrades_at_read_time():
+-    # Read-time tolerance: hand-edited junk is dropped, never crashes.
+-    cfg = normalize_council_config(_payload(name=42, role=["not", "a", "string"]))
+-    member = cfg["presets"]["p"]["members"][0]
+-    assert "name" not in member
+-    assert "role" not in member
++def test_normalize_empty_members_yields_four_unassigned_seats():
++    members = normalize_council_config(_payload(members=[]))["presets"]["p"]["members"]
++    assert len(members) == COUNCIL_SEAT_COUNT
++    assert all(m["provider"] == "" and m["enabled"] is False for m in members)
+ 
+ 
+-def test_normalize_judge_and_chairman_carry_name_but_never_role():
+-    payload = _payload()
+-    payload["presets"]["p"]["judge"] = {
+-        "provider": "openrouter", "model": "judge-m", "name": "Magistrate", "role": "ignored"}
+-    payload["presets"]["p"]["chairman"]["role"] = "ignored too"
+-    cfg = normalize_council_config(payload)
+-    judge = cfg["presets"]["p"]["judge"]
+-    chair = cfg["presets"]["p"]["chairman"]
+-    assert judge["name"] == "Magistrate"
+-    assert "role" not in judge
+-    assert chair["name"] == "The Chair"
+-    assert "role" not in chair
+-
+-
+-def test_resolve_preset_slots_carry_name_role():
+-    preset = resolve_council_preset(_payload(name="Skeptic", role="Doubt everything."))
+-    assert preset["members"][0]["name"] == "Skeptic"
+-    assert preset["members"][0]["role"] == "Doubt everything."
+-    assert preset["chairman"]["name"] == "The Chair"
+-
+-
+-def test_council_config_complete_ignores_name_role():
+-    # name/role are optional and never required for completeness.
++def test_normalize_drops_forbidden_slot_providers_to_unassigned():
++    payload = _payload(members=[
++        {"provider": "council", "model": "default"},
++        {"provider": "moa", "model": "x"},
++        {"provider": "qwen", "model": "ok"},
++    ])
++    members = normalize_council_config(payload)["presets"]["p"]["members"]
++    assert members[0]["provider"] == "" and members[0]["enabled"] is False
++    assert members[1]["provider"] == "" and members[1]["enabled"] is False
++    assert members[2]["provider"] == "qwen" and members[2]["model"] == "ok"
++
++
++def test_resolve_preset_carries_fixed_seats():
++    preset = resolve_council_preset(_payload())
++    assert [m["name"] for m in preset["members"]] == _SEAT_NAMES
++
++
++def test_council_config_complete_semantics():
++    # chairman set + >=1 assigned member
+     assert council_config_complete(_payload()["presets"]["p"]) is True
+-    bare = {"members": [{"provider": "a", "model": "b"}], "chairman": {"provider": "c", "model": "d"}}
+-    assert council_config_complete(bare) is True
++    # no assigned member
++    empty = {"members": [{"provider": "", "model": "", "enabled": False}],
++             "chairman": {"provider": "c", "model": "d"}}
++    assert council_config_complete(empty) is False
++    # no chairman
++    no_chair = {"members": [{"provider": "a", "model": "b"}], "chairman": {"provider": "", "model": ""}}
++    assert council_config_complete(no_chair) is False
+ 
+ 
+ # ── validate: write-boundary rejection ──────────────────────────────────────
+ 
+ 
+-def test_validate_accepts_string_name_and_role():
+-    assert validate_council_payload(_payload(name="Skeptic", role="Doubt everything.")) == []
++def test_validate_accepts_fixed_roster_payload():
++    assert validate_council_payload(_payload()) == []
+ 
+ 
+-def test_validate_rejects_non_string_role():
+-    problems = validate_council_payload(_payload(role=123))
+-    assert problems
+-    assert any("role" in p for p in problems)
++def test_validate_accepts_unassigned_seats():
++    payload = _payload(members=[
++        {"provider": "qwen", "model": "a"},
++        {"provider": "", "model": ""},
++        {"provider": "", "model": ""},
++        {"provider": "", "model": ""},
++    ])
++    assert validate_council_payload(payload) == []
++
++
++def test_validate_rejects_extra_seats():
++    payload = _payload(members=[{"provider": "qwen", "model": f"m{i}"} for i in range(5)])
++    problems = validate_council_payload(payload)
++    assert any("fixed seats" in p for p in problems)
++
++
++def test_validate_rejects_renamed_seat():
++    payload = _payload(members=[
++        {"provider": "qwen", "model": "a", "name": "Not The Skeptic"},
++    ])
++    problems = validate_council_payload(payload)
++    assert any("name is fixed" in p for p in problems)
++
++
++def test_validate_rejects_custom_role():
++    payload = _payload(members=[
++        {"provider": "qwen", "model": "a", "role": "Be nice to everyone."},
++    ])
++    problems = validate_council_payload(payload)
++    assert any("role is fixed" in p for p in problems)
++
++
++def test_validate_accepts_matching_fixed_name_and_role():
++    seat = COUNCIL_SEATS[0]
++    payload = _payload(members=[
++        {"provider": "qwen", "model": "a", "name": seat["name"], "role": seat["role"]},
++    ])
++    assert validate_council_payload(payload) == []
+ 
+ 
+ def test_validate_rejects_non_string_name():
+-    problems = validate_council_payload(_payload(name={"not": "a string"}))
+-    assert problems
++    problems = validate_council_payload(_payload(members=[
++        {"provider": "qwen", "model": "a", "name": {"not": "a string"}}]))
+     assert any("name" in p for p in problems)
+ 
+ 
+-def test_validate_rejects_non_string_name_on_judge_and_chairman():
++def test_validate_rejects_half_filled_seat():
++    problems = validate_council_payload(_payload(members=[{"provider": "qwen", "model": ""}]))
++    assert problems
++
++
++def test_validate_rejects_missing_chairman():
+     payload = _payload()
+-    payload["presets"]["p"]["judge"] = {"provider": "openrouter", "model": "j", "name": 7}
+-    payload["presets"]["p"]["chairman"]["name"] = ["x"]
++    payload["presets"]["p"]["chairman"] = {"provider": "", "model": ""}
+     problems = validate_council_payload(payload)
+-    assert problems
+-    assert any("judge" in p and "name" in p for p in problems)
+-    assert any("chairman" in p and "name" in p for p in problems)
++    assert any("chairman" in p for p in problems)
+ 
+ 
+ # ── save/load round-trip ────────────────────────────────────────────────────
+ 
+ 
+-def test_save_and_load_preserves_name_and_role(tmp_path, monkeypatch):
++def test_save_and_load_preserves_fixed_roster(tmp_path, monkeypatch):
+     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+-    saved = save_council_config(_payload(name="Skeptic", role="Doubt everything."))
+-    assert saved["presets"]["p"]["members"][0]["name"] == "Skeptic"
++    saved = save_council_config(_payload())
++    assert [m["name"] for m in saved["presets"]["p"]["members"]] == _SEAT_NAMES
+ 
+     from hermes_cli.config import load_config
+-    on_disk = load_config().get("council") or {}
+-    again = normalize_council_config(on_disk)
+-    member = again["presets"]["p"]["members"][0]
+-    assert member["name"] == "Skeptic"
+-    assert member["role"] == "Doubt everything."
+-    assert again["presets"]["p"]["chairman"]["name"] == "The Chair"
++    again = normalize_council_config(load_config().get("council") or {})
++    members = again["presets"]["p"]["members"]
++    assert len(members) == COUNCIL_SEAT_COUNT
++    assert members[0]["provider"] == "openrouter" and members[0]["model"] == "m1"
++    assert members[0]["role"] == COUNCIL_SEATS[0]["role"]
+-- 
+2.54.0 (Apple Git-157)
+

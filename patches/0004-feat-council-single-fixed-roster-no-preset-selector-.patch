@@ -1,0 +1,370 @@
+From 9a23b46f471d4cd79f9abb964e05c4d6a7a0e7f4 Mon Sep 17 00:00:00 2001
+From: girayk <girayk@gmail.com>
+Date: Thu, 1 Oct 2026 08:59:57 +0300
+Subject: [PATCH 4/4] =?UTF-8?q?feat(council):=20single=20fixed=20roster=20?=
+ =?UTF-8?q?=E2=80=94=20no=20preset=20selector,=20always=20enabled?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- normalize collapses every council config to one 'default' preset (always
+  enabled); save replaces presets instead of merging so stale ones can't linger
+- desktop: removed preset dropdown, Enabled toggle, Default line — page is now
+  just the 4 seats + judge + chairman model pickers
+- CLI: 'hermes council list' prints the single roster; configure walks the 4
+  fixed seats; delete subcommand removed (nothing to delete)
+- tests: 70 python passed, 36 desktop passed, tsc clean
+---
+ .../src/app/settings/model-settings.tsx       | 26 ------
+ hermes_cli/council_cmd.py                     | 92 +++++++------------
+ hermes_cli/council_config.py                  | 35 ++++---
+ hermes_cli/subcommands/council.py             |  5 +-
+ tests/hermes_cli/test_council_config.py       | 22 ++---
+ 5 files changed, 66 insertions(+), 114 deletions(-)
+
+diff --git a/apps/desktop/src/app/settings/model-settings.tsx b/apps/desktop/src/app/settings/model-settings.tsx
+index bf653c64c..79d831a41 100644
+--- a/apps/desktop/src/app/settings/model-settings.tsx
++++ b/apps/desktop/src/app/settings/model-settings.tsx
+@@ -1689,32 +1689,6 @@ export function ModelSettings({ onMainModelChanged, scopeProfile, subpage }: Mod
+         <section>
+           {subpage === undefined && <SectionHeading icon={Cpu} title={m.councilTitle} />}
+           <p className="mb-2 text-xs text-muted-foreground">{m.councilDescription}</p>
+-          <div className="mb-2 flex flex-wrap items-center gap-2">
+-            <Select onValueChange={setSelectedCouncilPreset} value={selectedCouncilPreset || council.default_preset}>
+-              <SelectTrigger className={cn('min-w-40', CONTROL_TEXT)}>
+-                <SelectValue placeholder={m.councilPreset} />
+-              </SelectTrigger>
+-              <SelectContent>
+-                {Object.keys(council.presets).map(name => (
+-                  <SelectItem key={name} value={name}>
+-                    {name}
+-                  </SelectItem>
+-                ))}
+-              </SelectContent>
+-            </Select>
+-            <label className="flex items-center gap-2 rounded-sm border border-border px-2 py-1 text-xs">
+-              {m.councilEnabled}
+-              <Switch
+-                checked={currentCouncilPreset.enabled !== false}
+-                disabled={applying}
+-                onCheckedChange={checked => updateCouncilPreset(prev => ({ ...prev, enabled: checked }))}
+-                size="xs"
+-              />
+-            </label>
+-          </div>
+-          <div className="mb-2 text-xs text-muted-foreground">
+-            {m.councilDefault} <span className="font-mono">{council.default_preset}</span>
+-          </div>
+           <div className="grid gap-1">
+             {currentCouncilPreset.members.map((slot, index) => (
+               <ListRow
+diff --git a/hermes_cli/council_cmd.py b/hermes_cli/council_cmd.py
+index 5861115b5..bdd5fdecd 100644
+--- a/hermes_cli/council_cmd.py
++++ b/hermes_cli/council_cmd.py
+@@ -102,39 +102,34 @@ def _provider_mismatch_notice(cfg: dict[str, Any], chairman: dict[str, Any]) ->
+ 
+ def _print_config(config: dict[str, Any]) -> None:
+     cfg = _council_section(config)
+-    print("Council presets")
+-    print(f"Default: {cfg['default_preset']}")
+-    print(f"Active in config: {cfg.get('active_preset') or '(off)'}")
+-    for name, preset in cfg["presets"].items():
+-        print(f"\n{'*' if name == cfg['default_preset'] else ' '} {name}")
+-        print("  Seats (fixed council — pick a model for each):")
+-        for idx, slot in enumerate(preset["members"], start=1):
+-            seat = str(slot.get("name") or f"Seat {idx}")
+-            state = _format_slot(slot)
+-            if not slot.get("enabled", True) and slot.get("provider"):
+-                state += " (disabled)"
+-            print(f"    {idx}. {seat}  ->  {state}")
+-            role = str(slot.get("role") or "").strip()
+-            if role:
+-                print(f"       {role}")
+-        judge = preset.get("judge") or {}
+-        if judge.get("provider"):
+-            judge_state = "" if judge.get("enabled", True) else " (disabled)"
+-            print(f"  Judge: {_format_slot(judge)}{judge_state} (ranks the anonymized member answers)")
+-        else:
+-            print("  Judge: (unset — members review each other anonymously)")
+-        chair_slot = preset.get("chairman") or {}
+-        print(
+-            f"  Chairman: {_format_slot(chair_slot)} "
+-            "(acting model — runs every step and carries almost all of the cost)"
+-        )
+-        if preset.get("lite"):
+-            print("  Lite: on (stage-2 review skipped)")
+-        if not preset.get("enabled", True):
+-            print("  Preset disabled: the chairman acts alone (like a plain model)")
+-        notice = _provider_mismatch_notice(config, chair_slot)
+-        if notice:
+-            print(f"    note: {notice}")
++    preset = cfg["presets"][DEFAULT_COUNCIL_PRESET_NAME]
++    print("Council (single fixed roster)")
++    print("  Seats (pick a model for each):")
++    for idx, slot in enumerate(preset["members"], start=1):
++        seat = str(slot.get("name") or f"Seat {idx}")
++        state = _format_slot(slot)
++        if not slot.get("enabled", True) and slot.get("provider"):
++            state += " (disabled)"
++        print(f"    {idx}. {seat}  ->  {state}")
++        role = str(slot.get("role") or "").strip()
++        if role:
++            print(f"       {role}")
++    judge = preset.get("judge") or {}
++    if judge.get("provider"):
++        judge_state = "" if judge.get("enabled", True) else " (disabled)"
++        print(f"  Judge: {_format_slot(judge)}{judge_state} (ranks the anonymized member answers)")
++    else:
++        print("  Judge: (unset — members review each other anonymously)")
++    chair_slot = preset.get("chairman") or {}
++    print(
++        f"  Chairman: {_format_slot(chair_slot)} "
++        "(acting model — runs every step and carries almost all of the cost)"
++    )
++    if preset.get("lite"):
++        print("  Lite: on (stage-2 review skipped)")
++    notice = _provider_mismatch_notice(config, chair_slot)
++    if notice:
++        print(f"    note: {notice}")
+ 
+ 
+ def _council_section(cfg: Any) -> dict[str, Any]:
+@@ -152,10 +147,9 @@ def _cmd_list(cfg: dict, args) -> None:
+ 
+ def _cmd_configure(cfg: dict, args) -> None:
+     council = _council_section(cfg)
+-    preset_name = (getattr(args, "name", None) or council.get("default_preset") or DEFAULT_COUNCIL_PRESET_NAME).strip()
+-    current: dict[str, Any] = council["presets"].get(preset_name, council["presets"][council["default_preset"]])
+-    print(f"Configure Council preset: {preset_name}")
+-    print("The council has 4 fixed seats. Pick a model for each (Enter keeps the current one).")
++    preset_name = DEFAULT_COUNCIL_PRESET_NAME
++    current: dict[str, Any] = council["presets"][preset_name]
++    print("Configure the Council (4 fixed seats). Pick a model for each (Enter keeps the current one).")
+     existing = list(current.get("members") or [])
+     members: list[dict[str, Any]] = []
+     for idx, seat in enumerate(COUNCIL_SEATS):
+@@ -200,39 +194,19 @@ def _cmd_configure(cfg: dict, args) -> None:
+             "Refusing to save an incomplete Council preset: the chairman slot and at least one "
+             "assigned member seat are required.")
+     council["presets"][preset_name] = current
+-    council.setdefault("default_preset", preset_name)
+     notice = _provider_mismatch_notice(cfg, current["chairman"])
+     if notice:
+         print(notice)
+     _save(cfg, council)
+-    print(f"Saved Council preset: {preset_name}")
++    print("Saved Council configuration.")
+     _print_config(cfg)
+ 
+ 
+-def _cmd_delete(cfg: dict, args) -> None:
+-    council = _council_section(cfg)
+-    preset_name = (getattr(args, "name", None) or "").strip()
+-    if not preset_name:
+-        raise SystemExit("Usage: hermes council delete <name>")
+-    if preset_name not in council["presets"]:
+-        raise SystemExit(f"Unknown Council preset: {preset_name}")
+-    if len(council["presets"]) <= 1:
+-        raise SystemExit("Cannot delete the only Council preset")
+-    del council["presets"][preset_name]
+-    if council["default_preset"] == preset_name:
+-        council["default_preset"] = next(iter(council["presets"]))
+-    if council.get("active_preset") == preset_name:
+-        council["active_preset"] = ""
+-    _save(cfg, council)
+-    print(f"Deleted Council preset: {preset_name}")
+-
+-
+ _SUBCOMMANDS = {
+     "list": _cmd_list,
+     "ls": _cmd_list,
+     "config": _cmd_configure,
+-    "configure": _cmd_configure,
+-    "delete": _cmd_delete}
++    "configure": _cmd_configure}
+ 
+ 
+ def cmd_council(args) -> None:
+diff --git a/hermes_cli/council_config.py b/hermes_cli/council_config.py
+index 36d336ff9..8bf132339 100644
+--- a/hermes_cli/council_config.py
++++ b/hermes_cli/council_config.py
+@@ -211,7 +211,13 @@ _FLAT_PRESET_KEYS = ("members", "judge", "chairman", "lite", "enabled")
+ 
+ 
+ def normalize_council_config(raw: Any) -> dict[str, Any]:
+-    """Return validated Council config with named presets (shape mirrors normalize_moa_config)."""
++    """Return the Council config collapsed to ONE preset named ``default``.
++
++    The Council is a single fixed roster (4 seats + judge + chairman) — there is
++    no preset selector in the UI and it is always enabled. Any stored preset is
++    folded into the single ``default`` preset (the raw ``default_preset`` when
++    present, else the first), so legacy multi-preset configs migrate cleanly.
++    """
+     if not isinstance(raw, dict):
+         raw = {}
+ 
+@@ -225,19 +231,18 @@ def normalize_council_config(raw: Any) -> dict[str, Any]:
+     if not presets:  # Legacy flat config becomes the default preset.
+         presets[DEFAULT_COUNCIL_PRESET_NAME] = _normalize_preset(raw)
+ 
+-    default_name = str(raw.get("default_preset") or "").strip()
+-    if not default_name or default_name not in presets:
+-        default_name = next(iter(presets))  # never empty: flat config seeds the default
++    # Collapse to a single 'default' preset (always enabled).
++    wanted = str(raw.get("default_preset") or "").strip()
++    source = presets.get(wanted) or next(iter(presets.values()))
++    source = {**source, "enabled": True}
++    presets = {DEFAULT_COUNCIL_PRESET_NAME: source}
+ 
+-    active_name = str(raw.get("active_preset") or "").strip()
+-    if active_name not in presets:
+-        active_name = ""
+     return {
+-        "default_preset": default_name,
+-        "active_preset": active_name,
++        "default_preset": DEFAULT_COUNCIL_PRESET_NAME,
++        "active_preset": "",
+         "presets": presets,
+-        # Compatibility/flattened view of the default preset for dashboard/desktop callers.
+-        **{key: deepcopy(presets[default_name][key]) for key in _FLAT_PRESET_KEYS}}
++        # Compatibility/flattened view of the single preset for dashboard/desktop callers.
++        **{key: deepcopy(presets[DEFAULT_COUNCIL_PRESET_NAME][key]) for key in _FLAT_PRESET_KEYS}}
+ 
+ 
+ def council_config_complete(preset: Any) -> bool:
+@@ -402,14 +407,16 @@ def normalize_council_model_string(model: Any) -> tuple[str | None, Any]:
+ 
+ 
+ def save_council_config(section: Any) -> dict[str, Any]:
+-    """Normalize *section* and persist ONLY the ``council:`` block (deep-merged over the raw
+-    on-disk config), mirroring the MoA write path's merge-don't-overwrite rule (#58819/#89184):
+-    hand-edited keys not covered by the payload survive, and no other section is rewritten."""
++    """Normalize *section* and persist the ``council:`` block, REPLACING any existing
++    presets (never merge) so stale presets like a removed ``lite`` cannot linger after
++    the collapse to a single fixed roster. Other config sections are left untouched."""
+     from hermes_cli.config import load_config, save_config
+ 
+     normalized = normalize_council_config(section)
+     cfg = load_config()
+     council_section = dict(cfg.get("council") or {}) if isinstance(cfg, dict) else {}
++    # Replace the preset-bearing keys outright; keep any unrelated hand-edited keys.
+     council_section.update(normalized)
++    council_section["presets"] = normalized["presets"]
+     save_config({"council": council_section}, merge_existing=True)
+     return normalized
+diff --git a/hermes_cli/subcommands/council.py b/hermes_cli/subcommands/council.py
+index ecb9ab2ae..c0b82e0c8 100644
+--- a/hermes_cli/subcommands/council.py
++++ b/hermes_cli/subcommands/council.py
+@@ -13,9 +13,6 @@ def build_council_parser(subparsers) -> None:
+                     "(members answer + review; the chairman acts).")
+     council_subparsers = council_parser.add_subparsers(dest="council_command")
+     council_subparsers.add_parser("list", aliases=["ls"], help="Show current Council model slots")
+-    council_configure = council_subparsers.add_parser(
++    council_subparsers.add_parser(
+         "configure", aliases=["config"], help="Interactively pick Council models")
+-    council_configure.add_argument("name", nargs="?", help="Preset name to create or update")
+-    council_delete = council_subparsers.add_parser("delete", aliases=["rm"], help="Delete a Council preset")
+-    council_delete.add_argument("name", help="Preset name to delete")
+     council_parser.set_defaults(func=cmd_council)
+diff --git a/tests/hermes_cli/test_council_config.py b/tests/hermes_cli/test_council_config.py
+index bfc281772..239f4c9fc 100644
+--- a/tests/hermes_cli/test_council_config.py
++++ b/tests/hermes_cli/test_council_config.py
+@@ -21,7 +21,7 @@ _SEAT_NAMES = [seat["name"] for seat in COUNCIL_SEATS]
+ def _payload(members=None):
+     return {
+         "presets": {
+-            "p": {
++            "default": {
+                 "members": members if members is not None else [
+                     {"provider": "openrouter", "model": "m1"},
+                     {"provider": "openrouter", "model": "m2"},
+@@ -38,7 +38,7 @@ def _payload(members=None):
+ 
+ def test_normalize_forces_four_seats_with_fixed_names_and_roles():
+     cfg = normalize_council_config(_payload())
+-    members = cfg["presets"]["p"]["members"]
++    members = cfg["presets"]["default"]["members"]
+     assert len(members) == COUNCIL_SEAT_COUNT == 4
+     assert [m["name"] for m in members] == _SEAT_NAMES
+     for member, seat in zip(members, COUNCIL_SEATS):
+@@ -50,13 +50,13 @@ def test_normalize_overrides_user_supplied_names_and_roles():
+         {"provider": "qwen", "model": "a", "name": "My Custom Name", "role": "My custom duty"},
+         {"provider": "qwen", "model": "b"},
+     ])
+-    members = normalize_council_config(payload)["presets"]["p"]["members"]
++    members = normalize_council_config(payload)["presets"]["default"]["members"]
+     assert members[0]["name"] == _SEAT_NAMES[0]
+     assert members[0]["role"] == COUNCIL_SEATS[0]["role"]
+ 
+ 
+ def test_normalize_pads_missing_seats_as_unassigned():
+-    members = normalize_council_config(_payload())["presets"]["p"]["members"]
++    members = normalize_council_config(_payload())["presets"]["default"]["members"]
+     assert members[0]["provider"] == "openrouter" and members[0]["enabled"] is True
+     for unassigned in members[2:]:
+         assert unassigned["provider"] == "" and unassigned["model"] == ""
+@@ -67,13 +67,13 @@ def test_normalize_drops_extra_members_beyond_seats():
+     payload = _payload(members=[
+         {"provider": "qwen", "model": f"m{i}"} for i in range(6)
+     ])
+-    members = normalize_council_config(payload)["presets"]["p"]["members"]
++    members = normalize_council_config(payload)["presets"]["default"]["members"]
+     assert len(members) == COUNCIL_SEAT_COUNT
+     assert [m["model"] for m in members[:4]] == ["m0", "m1", "m2", "m3"]
+ 
+ 
+ def test_normalize_empty_members_yields_four_unassigned_seats():
+-    members = normalize_council_config(_payload(members=[]))["presets"]["p"]["members"]
++    members = normalize_council_config(_payload(members=[]))["presets"]["default"]["members"]
+     assert len(members) == COUNCIL_SEAT_COUNT
+     assert all(m["provider"] == "" and m["enabled"] is False for m in members)
+ 
+@@ -84,7 +84,7 @@ def test_normalize_drops_forbidden_slot_providers_to_unassigned():
+         {"provider": "moa", "model": "x"},
+         {"provider": "qwen", "model": "ok"},
+     ])
+-    members = normalize_council_config(payload)["presets"]["p"]["members"]
++    members = normalize_council_config(payload)["presets"]["default"]["members"]
+     assert members[0]["provider"] == "" and members[0]["enabled"] is False
+     assert members[1]["provider"] == "" and members[1]["enabled"] is False
+     assert members[2]["provider"] == "qwen" and members[2]["model"] == "ok"
+@@ -97,7 +97,7 @@ def test_resolve_preset_carries_fixed_seats():
+ 
+ def test_council_config_complete_semantics():
+     # chairman set + >=1 assigned member
+-    assert council_config_complete(_payload()["presets"]["p"]) is True
++    assert council_config_complete(_payload()["presets"]["default"]) is True
+     # no assigned member
+     empty = {"members": [{"provider": "", "model": "", "enabled": False}],
+              "chairman": {"provider": "c", "model": "d"}}
+@@ -167,7 +167,7 @@ def test_validate_rejects_half_filled_seat():
+ 
+ def test_validate_rejects_missing_chairman():
+     payload = _payload()
+-    payload["presets"]["p"]["chairman"] = {"provider": "", "model": ""}
++    payload["presets"]["default"]["chairman"] = {"provider": "", "model": ""}
+     problems = validate_council_payload(payload)
+     assert any("chairman" in p for p in problems)
+ 
+@@ -178,11 +178,11 @@ def test_validate_rejects_missing_chairman():
+ def test_save_and_load_preserves_fixed_roster(tmp_path, monkeypatch):
+     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+     saved = save_council_config(_payload())
+-    assert [m["name"] for m in saved["presets"]["p"]["members"]] == _SEAT_NAMES
++    assert [m["name"] for m in saved["presets"]["default"]["members"]] == _SEAT_NAMES
+ 
+     from hermes_cli.config import load_config
+     again = normalize_council_config(load_config().get("council") or {})
+-    members = again["presets"]["p"]["members"]
++    members = again["presets"]["default"]["members"]
+     assert len(members) == COUNCIL_SEAT_COUNT
+     assert members[0]["provider"] == "openrouter" and members[0]["model"] == "m1"
+     assert members[0]["role"] == COUNCIL_SEATS[0]["role"]
+-- 
+2.54.0 (Apple Git-157)
+

@@ -56,19 +56,33 @@ async def save_config(body: dict):
 
 
 @router.get("/models")
-async def get_models():
+def get_models():
+    """Model picker source — the SAME payload as every Hermes model menu.
+
+    build_models_payload(load_picker_context()) is exactly what the desktop
+    model dropdown consumes: built-in + canonical/plugin providers (AGCs like
+    antigravity-agy, kiro-acp, typesafe-jev) + user-config custom providers,
+    each gated on real credentials. Sync def on purpose: FastAPI runs it in a
+    threadpool and non_blocking_catalogs keeps it off live probes.
+    """
     out = []
     try:
-        from hermes_cli.config import load_config
-        providers = (load_config() or {}).get("providers") or {}
-        for slug, p in providers.items():
-            if not isinstance(p, dict) or slug in ("council", "moa"):
+        from hermes_cli.inventory import build_models_payload, load_picker_context
+        payload = build_models_payload(
+            load_picker_context(),
+            for_picker=True, non_blocking_catalogs=True)
+        for r in payload.get("providers", []) or []:
+            if not isinstance(r, dict):
                 continue
-            models = list((p.get("models") or {}).keys())
-            if not models and p.get("model"):
-                models = [p["model"]]
-            if models:
-                out.append({"provider": slug, "name": p.get("name") or slug, "models": models})
+            slug = str(r.get("slug") or "")
+            if not slug or slug in ("council", "moa"):
+                continue
+            models = [str(m) for m in (r.get("models") or [])]
+            if not models:
+                continue
+            out.append({"provider": slug,
+                        "name": str(r.get("name") or slug),
+                        "models": models})
     except Exception:
         pass
     return {"providers": out}

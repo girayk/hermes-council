@@ -1,0 +1,17 @@
+name: hermes-council
+kind: standalone
+version: 1.0.0
+description: >-
+  LLM Council (karpathy/llm-council): 4 fixed advisor seats (First-Principles
+  Analyst, Skeptic, Pragmatist, Researcher) answer in parallel, anonymously
+  review and rank each other, and a Chairman synthesizes the final answer.
+  Register the "Council" group in the model menu, a council_deliberate tool,
+  /council, hermes council CLI, and a desktop panel. No API keys — members
+  borrow your configured Hermes provider credentials.
+author: girayk
+provides_tools:
+  - council_deliberate
+provides_commands:
+  - council
+emits: []
+listens: []

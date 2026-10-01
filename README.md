@@ -1,12 +1,12 @@
-# Hermes Council
+# hermes-council
 
-An **LLM Council** for [Hermes Agent](https://github.com/NousResearch/hermes-agent) —
-[karpathy/llm-council](https://github.com/karpathy/llm-council) semantics built on
-Hermes's own Mixture-of-Agents mechanics.
+An **LLM Council** plugin for [Hermes Agent](https://github.com/NousResearch/hermes-agent) —
+[karpathy/llm-council](https://github.com/karpathy/llm-council) semantics as a first-class
+Hermes plugin.
 
-Four fixed advisors answer your question in parallel, **anonymously review and rank
-each other**, and a chairman model synthesizes the final answer — while staying a
-normal Hermes model: tools, streaming, sessions, interrupts, everything works.
+Four fixed advisor seats answer your question **in parallel**, **anonymously review and
+rank each other**, and a **Chairman** model synthesizes the final answer. Members borrow
+the provider credentials you already configured in Hermes — **no API keys, no extra setup**.
 
 ```
 Your question
@@ -18,20 +18,9 @@ Your question
    │    every seat ranks the others — or a dedicated Judge ranks them —
    │    strict "FINAL RANKING:" parsing → aggregate avg rank + votes
    │
-   └─ Stage 3 · Chairman acts
-        ranked digest + all answers as private guidance;
-        the chairman is the acting model (tools + streaming)
+   └─ Stage 3 · Chairman synthesis
+        ranked digest + all answers as private guidance
 ```
-
-## Why it's a core fork, not a plugin
-
-Council is implemented exactly like Hermes's built-in **Mixture of Agents** feature —
-a *virtual provider* whose presets appear in the model menu, an OpenAI-shaped facade
-client the agent loop calls, and member calls that borrow your already-configured
-provider credentials via `call_llm` (**no extra API keys, ever**). Those surfaces
-(agent loop dispatch, model menu, Settings page) live in the Hermes core, so Council
-ships as a patch set against `hermes-agent`, not a marketplace plugin. MoA itself is
-untouched — the fork is purely additive.
 
 ## The council
 
@@ -42,106 +31,115 @@ untouched — the fork is purely additive.
 | **Pragmatist** | What actually works in practice — constraints, effort, reversibility, second-order effects. |
 | **Researcher** | Ground claims in verifiable evidence; use web search and code inspection where available. |
 
-Seats are fixed — you only pick **which of your models sits in each seat**.
-Stage 2 is fully anonymous (reviewers never see seat names, roles, or model ids —
-karpathy's anti-favoritism rule, enforced by tests). Unassigned seats are skipped.
+Seats are fixed — you only pick **which of your models sits in each seat** (panel
+or `hermes council configure`). Stage 2 is fully anonymous: reviewers never see seat
+names, roles, or model ids (karpathy's anti-favoritism rule, enforced by tests).
+Unassigned seats are skipped.
 
 Optional slots:
-- **Judge** — when set, one model ranks the anonymized answers instead of peer review.
-- **Chairman** — the acting model. It runs every step of the tool loop and carries
-  almost all of the cost (same billing model as MoA's aggregator).
+
+- **Judge** — when set, one model ranks the anonymized answers in a single call instead
+  of full peer review.
+- **Chairman** — synthesizes the final answer (required).
 
 ## Install
 
-Requirements: a checkout of [hermes-agent](https://github.com/NousResearch/hermes-agent)
-and the Hermes desktop app already working (this patch adds to both).
-
 ```bash
-git clone https://github.com/<you>/hermes-council.git
-cd hermes-council
-./install.sh /path/to/hermes-agent      # applies patches/council.patch
+hermes plugins install girayk/hermes-council
+hermes plugins enable hermes-council
 ```
 
-Or by hand:
+or clone into `~/.hermes/plugins/`:
 
 ```bash
-cd /path/to/hermes-agent
-git checkout -b feature/council
-git am /path/to/hermes-council/patches/*.patch
+git clone https://github.com/girayk/hermes-council ~/.hermes/plugins/hermes-council
+hermes plugins enable hermes-council
 ```
 
-Then rebuild the desktop app (`cd apps/desktop && npm run pack`) and restart Hermes.
+Requires a working Hermes install with at least two configured provider models
+(any providers — Qwen, OpenRouter, Anthropic, OpenAI, local…). Restart the
+desktop app / gateway after enabling.
 
 ## Configure
 
-**Desktop:** Settings → Model → **Council** — pick a model for each of the 4 seats,
-optionally a Judge, and the Chairman. Autosaves.
+**Desktop:** the plugin ships a **/council** panel (sidebar → Council): each seat shows
+its name + duty, you pick provider/model from your configured catalog; Judge and
+Chairman below; autosaves to `council:` in config.yaml.
 
 **CLI:**
 
 ```bash
-hermes council configure     # walks the 4 seats + judge + chairman
-hermes council list          # shows the roster
+hermes council configure    # walk the 4 seats + judge + chairman
+hermes council list         # show the roster
 ```
 
-**config.yaml** (what the UI writes):
+**config.yaml** (what the panel writes):
 
 ```yaml
 council:
   default_preset: default
   presets:
     default:
-      members:                       # the 4 fixed seats, positionally
-        - {provider: qwen, model: qwen3.8-max, enabled: true}      # First-Principles Analyst
+      members:                     # the 4 fixed seats, positionally
+        - {provider: qwen, model: qwen3.8-max, enabled: true}       # First-Principles Analyst
         - {provider: qwen, model: deepseek-v4-pro, enabled: true}   # Skeptic
         - {provider: qwen, model: glm-5.3, enabled: true}           # Pragmatist
         - {provider: "", model: "", enabled: false}                 # Researcher (unassigned)
       judge: {provider: "", model: "", enabled: true}   # empty = peer review
-      chairman: {provider: qwen, model: qwen3.8-max}    # acting model
-      lite: false                                       # true = skip Stage 2 (N+1 calls)
+      chairman: {provider: qwen, model: qwen3.8-max}
+      lite: false                                        # true = skip Stage 2
       enabled: true
 ```
 
 ## Use it
 
-Select **Council: default** in the model menu (the row shows the seat names), or:
+Three surfaces, one engine:
 
-```bash
-/model default --provider council
-hermes -z "your hard question" --model default --provider council
-```
+1. **Tool** — the model can call `council_deliberate` on hard questions (the bundled
+   skill teaches it when that's worth the cost).
+2. **Slash command** — `/council <question>` in any chat (CLI, TUI, gateway).
+3. **Model menu** — the plugin registers a **Council** group in every model picker
+   (its "model" is the council preset): `/model default --provider council`, or the
+   desktop model dropdown. Every turn of that session runs through the council — the
+   chairman acts as the model (tools + streaming work normally), with the ranked
+   member digest as its private guidance.
 
-While a council turn runs you get live progress in the chat's reasoning area and the
-TUI: each member's answer as it lands (`council.member`), each reviewer's ranking
-(`council.review`), and the chairman handoff (`council.synthesizing`). The chairman's
-synthesis streams out as the normal assistant reply — tool calls included.
+Recent deliberations land in `~/.hermes/council/runs/` and show in the panel.
 
 ## Cost
 
-Per user turn: `N+1` calls with `lite: true` (N seat answers + chairman),
-up to `2N+1` with peer review (N answers + N reviews + chairman). The fan-out runs
-**once per user turn** — tool-loop iterations reuse the cached guidance and only
-re-call the chairman, exactly like MoA's default `user_turn` cadence. Every stage
-has hard wall-clock deadlines; a wedged model is dropped with a failure note,
-never hangs the turn.
+Per deliberation: `N+1` calls with `lite: true` (N seat answers + chairman), up to
+`2N+1` with peer review. As a session model, the fan-out runs **once per user turn**;
+tool-loop iterations reuse the cached guidance and only re-call the chairman. Every
+stage has hard wall-clock deadlines — a wedged model is dropped with a failure note,
+never hangs your turn.
 
-## What's in the patch set
+## How it works (plugin surfaces only — no core patches)
 
-| Area | Files |
+| Surface | Where |
 |---|---|
-| Engine (3-stage loop, facade, fan-out cache, deadlines) | `agent/council_loop.py` + council dispatch at every `provider == "moa"` gate in `agent/` |
-| Config/CLI | `hermes_cli/council_config.py`, `council_cmd.py`, `subcommands/council.py` |
-| Menu/catalog | virtual `council` row in `inventory.py`, `models_catalog_static.py`, `model_switch*.py`, `auth.py`, `runtime_provider.py` |
-| HTTP API | `GET/PUT /api/model/council` in `web_routers/models.py` |
-| Progress events | `council.member/review/phase/synthesizing` in `tui_gateway/` + gateway contract |
-| Desktop UI | Settings → Model → Council page, "Council presets" menu section with seat names, live stage rendering, i18n |
-| Tests | `tests/agent/test_council_loop.py` (16), `tests/hermes_cli/test_council_config.py` (18) + MoA regression suites green |
+| Model menu group | plugin `ProviderProfile` via `register_provider` — the documented model-provider plugin seam; virtual `council://local` provider, presets as models |
+| Turn engine | `CouncilClient` OpenAI-shaped facade via `create_client()`; stages call `agent.auxiliary_client.call_llm(task=…, provider=…, model=…)` with YOUR credentials |
+| Tool / slash / CLI | `register(ctx)`: `council_deliberate`, `/council`, `hermes council` |
+| Desktop panel | `desktop/plugin.js` (plain ESM, plugin SDK) + `dashboard/plugin_api.py` routes under `/api/plugins/hermes-council/` |
+| Skill | bundled `skills/llm-council/SKILL.md` (when to convene a council, anti-sycophancy rules) |
+| Config | `council:` block in config.yaml (`council_config.py` normalize/validate/save) |
 
-MoA is untouched: all Council code paths are additive (`provider in ('moa','council')`
-or parallel branches), and the full MoA test suite passes unchanged.
+Stage-2 prompts contain only "Response A/B/C" labels — seat names, roles and model
+ids never reach reviewers (anonymity-guard tests). The chairman's guidance
+de-anonymizes: `Response A (First-Principles Analyst (qwen:qwen3.8-max))`.
+
+## Development
+
+```bash
+hermes plugins validate ~/.hermes/plugins/hermes-council   # manifest, security scan, desktop surface
+cd tests && HERMES_HOME=/tmp/council-test pytest -q        # 35 tests (engine, config, anonymity guards)
+```
 
 ## Credits
 
 - Council protocol: [karpathy/llm-council](https://github.com/karpathy/llm-council)
-- Seat roster & anti-sycophancy duties: the `llm-council` skill protocol
-- Mechanics: Hermes Agent's Mixture-of-Agents (`agent/moa_loop.py`)
+- Seat roster & duties: the `llm-council` skill protocol (independence before interaction,
+  stake-weighted criticism, anti-sycophancy rules)
+- Mechanics follow Hermes's own Mixture-of-Agents design (virtual provider + facade
+  client + `call_llm` fan-out), implemented entirely through public plugin seams.
